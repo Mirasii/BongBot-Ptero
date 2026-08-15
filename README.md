@@ -114,13 +114,14 @@ This project uses `@pookiesoft/bongbot-core` from GitHub Packages (private). You
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature-name`
-3. Make your changes and add tests
-4. Run tests: `npm test`
-5. Commit your changes: `git commit -am 'Add feature'`
-6. Push to the branch: `git push origin feature-name`
-7. Submit a pull request
+1. Create a feature branch: `git checkout -b feature-name`
+2. Make your changes and add tests
+3. Run tests: `npm test`
+4. Commit your changes: `git commit -am 'Add feature'`
+5. Push to the branch: `git push origin feature-name`
+6. Submit a pull request
+
+If you used AI to write any part of it, read [AI Contributions](CONTRIBUTING.md#ai-contributions) before opening the pull request.
 
 ## Testing
 
