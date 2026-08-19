@@ -30,7 +30,7 @@
     },
     "devDependencies": {
         "@pookiesoft/bongbot-core": "^1.6.43",
-        "@types/better-sqlite3": "^7.6.13",
+        "@types/better-sqlite3": "^9.6.0",
         "@types/jest": "^30.0.0",
         "better-sqlite3": "^13.0.3",
         "cross-env": "^10.1.0",
