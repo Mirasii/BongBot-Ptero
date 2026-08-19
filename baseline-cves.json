@@ -35,6 +35,11 @@
     "pkg": "libc6"
   },
   {
+    "id": "CVE-2026-14456",
+    "severity": "HIGH",
+    "pkg": "libssl3t64"
+  },
+  {
     "id": "CVE-2026-27171",
     "severity": "MEDIUM",
     "pkg": "zlib1g"
