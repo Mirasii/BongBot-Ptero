@@ -9,6 +9,7 @@ import type { Logger } from '@pookiesoft/bongbot-core';
 
 const ACTION_POLL_INTERVAL_MS = 500;
 const ACTION_TIMEOUT_MS = 60000;
+const ACTION_TIMEOUT_MESSAGE = `⚠️ Stopped watching after ${ACTION_TIMEOUT_MS / 1000} seconds. Run \`/pterodactyl manage\` to check again.`;
 
 export default class ServerStatus {
     private db: Database;
@@ -203,6 +204,11 @@ export default class ServerStatus {
             await ephemeralFollowup(componentInteraction, failureMessage);
         }
 
+        if (!results.some((result) => result.success)) {
+            await this.refreshStatus(componentInteraction, dbServer.id);
+            return;
+        }
+
         try {
             await this.pollUntilComplete(componentInteraction, dbServer, { action, identifier, failureMessage });
         } finally {
@@ -222,22 +228,28 @@ export default class ServerStatus {
         while (!this.cancelled) {
             const servers = this.stateManager.targets(context.identifier);
             const resources = await fetchAllServerResources(this.caller, servers, dbServer.serverUrl, dbServer.apiKey);
-            this.stateManager.observeAll(resources);
+            this.stateManager.observeAll(servers, resources);
 
             const complete = this.stateManager.allComplete();
             const pending = !complete && Date.now() < deadline;
 
             let status: string;
-            status = `⚠️ Stopped watching after ${ACTION_TIMEOUT_MS / 1000} seconds. Run \`/pterodactyl manage\` to check again.`;
-            if (pending) { status = this.getActionMessage(context.action, context.identifier); }
-            else if (complete) { status = '✅ Action complete.'; }
-                
+            if (pending) {
+                status = this.getActionMessage(context.action, context.identifier);
+            } else if (complete) {
+                status = '✅ Action complete.';
+            } else {
+                status = ACTION_TIMEOUT_MESSAGE;
+            }
+
+            const managed = this.stateManager.managedServers();
+            const currentResources = this.stateManager.currentResources();
             const description = [context.failureMessage, status].filter(Boolean).join('\n');
-            const render = [description, ...resources.map((r) => r?.attributes.current_state)].join('|');
+            const render = [description, ...currentResources.map((r) => r?.attributes.current_state)].join('|');
             if (render !== lastRender) {
                 await componentInteraction.editReply({
-                    embeds: [buildServerStatusEmbed(servers, resources, description)],
-                    components: buildServerControlComponents(servers, resources, dbServer.id, pending),
+                    embeds: [buildServerStatusEmbed(managed, currentResources, description)],
+                    components: buildServerControlComponents(managed, currentResources, dbServer.id, pending),
                 });
                 lastRender = render;
             }

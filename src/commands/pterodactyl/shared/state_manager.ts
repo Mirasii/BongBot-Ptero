@@ -34,6 +34,12 @@ export class StateManager {
         return state ? [state.server] : [];
     }
 
+    currentResources(): (ServerResources | null)[] {
+        const states: (ServerResources | null)[] = [];
+        this.states.forEach(state => states.push(state.resources))
+        return states;
+    }
+
     trackState(identifier: string, action: ActionType): void {
         this.states.get(identifier)?.track(action);
     }
@@ -42,9 +48,8 @@ export class StateManager {
         targets.forEach((target) => this.states.get(target.attributes.identifier)?.clearAction());
     }
 
-    observeAll(resources: (ServerResources | null)[]): void {
-        let index = 0;
-        this.states.forEach((state) => state.observe(resources[index++]));
+    observeAll(servers: PterodactylServer[], resources: (ServerResources | null)[]): void {
+        servers.forEach((server, index) => this.states.get(server.attributes.identifier)?.observe(resources[index]));
     }
 
     isComplete(identifier: string): boolean {
@@ -66,6 +71,7 @@ export class StateManager {
 
 export class State {
     readonly server: PterodactylServer;
+    resources: ServerResources | null;
 
     readonly startingStatus: string;
     private currentStatus: string;
@@ -76,6 +82,7 @@ export class State {
 
     constructor(server: PterodactylServer, resources: ServerResources | null) {
         this.server = server;
+        this.resources = resources;
         this.startingStatus = resources?.attributes.current_state ?? '';
         this.currentStatus = this.startingStatus;
         this.currentUptime = resources?.attributes.resources.uptime ?? 0;
@@ -96,6 +103,7 @@ export class State {
 
     /** The uptime check catches a restart that began and finished between two polls. */
     observe(resources: ServerResources | null): void {
+        this.resources = resources;
         if (!resources) {
             return;
         }
