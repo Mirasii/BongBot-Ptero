@@ -1,10 +1,14 @@
 import {
+    ActionRowBuilder,
     EmbedBuilder,
     ChatInputCommandInteraction,
     ButtonInteraction,
+    ComponentType,
     Message,
+    MessageActionRowComponentBuilder,
     StringSelectMenuInteraction,
 } from 'discord.js';
+import type { PterodactylServer } from './shared/pterodactyl_api.js';
 import Database, { PterodactylServer as DbPterodactylServer } from '../../helpers/database.js';
 import { buildError, Caller } from '@pookiesoft/bongbot-core';
 import {
@@ -89,7 +93,9 @@ export default class ServerStatus {
         const controller = new AbortController();
         let busy = false;
         let latestEmbed = message.embeds?.[0] ? EmbedBuilder.from(message.embeds[0]) : undefined;
-        let latestComponents: Message['components'] = message.components;
+        let latestComponents: ManageActionRow[] = message.components
+            .filter(isActionRow)
+            .map((row) => ActionRowBuilder.from(row));
         let pendingEdit: Promise<unknown> = Promise.resolve();
         const view: ManageView = {
             signal: controller.signal,
@@ -108,7 +114,11 @@ export default class ServerStatus {
                 }
                 if (options.embeds?.[0]) latestEmbed = EmbedBuilder.from(options.embeds[0]);
                 if (options.components) {
-                    latestComponents = options.components as Message['components'];
+                    latestComponents = options.components.map((row) =>
+                        row instanceof ActionRowBuilder
+                            ? (row as ManageActionRow)
+                            : ActionRowBuilder.from(row as ApiActionRow)
+                    );
                 }
             },
         };
@@ -251,9 +261,9 @@ export default class ServerStatus {
         if (failureMessage) await componentInteraction.followUp({ content: failureMessage, ephemeral: true });
 
         const targetIds = new Set(identifiers);
-        const readResources = (server: (typeof servers)[number]) =>
+        const readResources = (server: PterodactylServer) =>
             fetchServerResources(this.caller, server.attributes.identifier, dbServer.serverUrl, dbServer.apiKey);
-        const isTarget = (server: (typeof servers)[number]) => targetIds.has(server.attributes.identifier);
+        const isTarget = (server: PterodactylServer) => targetIds.has(server.attributes.identifier);
         const baseline = await Promise.all(servers.map((server) => (isTarget(server) ? null : readResources(server))));
         const deadline = Date.now() + ACTION_TIMEOUT_MS;
         const restartTransitions = new Set<string>();
@@ -269,9 +279,11 @@ export default class ServerStatus {
                     resources[index]?.attributes.current_state,
                 ])
             );
-            for (const id of identifiers) {
-                const state = states.get(id);
-                if (state && state !== 'running') restartTransitions.add(id);
+            if (action === 'restart') {
+                for (const id of identifiers) {
+                    const state = states.get(id);
+                    if (state && state !== 'running') restartTransitions.add(id);
+                }
             }
             const complete = isActionComplete(states, identifiers, action, restartTransitions);
             const timedOut = Date.now() >= deadline;
@@ -329,6 +341,12 @@ export default class ServerStatus {
 }
 
 type ValidatedDbServer = DbPterodactylServer & { id: number };
+type ApiActionRow = Extract<Message['components'][number], { type: ComponentType.ActionRow }>;
+type ManageActionRow = ActionRowBuilder<MessageActionRowComponentBuilder>;
+
+function isActionRow(component: Message['components'][number]): component is ApiActionRow {
+    return component.type === ComponentType.ActionRow;
+}
 
 function buildFailureMessage(action: string, identifier: string, names: string[]): string {
     if (names.length === 0) return '';

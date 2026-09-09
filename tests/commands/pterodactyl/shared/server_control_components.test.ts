@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { ComponentType } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } from 'discord.js';
 import {
     buildServerControlComponents,
     disableAllComponents,
@@ -160,6 +160,16 @@ describe('serverControlComponents', () => {
     });
 
     describe('disableAllComponents', () => {
+        it('disables builder rows as well as API component rows', () => {
+            const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+                new ButtonBuilder().setCustomId('test-button').setLabel('Test').setStyle(ButtonStyle.Primary)
+            );
+
+            const [disabledRow] = disableAllComponents([row]);
+
+            expect(disabledRow.components[0].data.disabled).toBe(true);
+        });
+
         it('should disable StringSelect components', () => {
             const mockSelectComponent = {
                 type: ComponentType.StringSelect,
