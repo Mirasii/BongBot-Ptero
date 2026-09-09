@@ -4,7 +4,9 @@ import {
     ButtonStyle,
     StringSelectMenuBuilder,
     ComponentType,
-    APIButtonComponent,
+    APIActionRowComponent,
+    APIComponentInMessageActionRow,
+    MessageActionRowComponentBuilder,
 } from 'discord.js';
 import { PterodactylServer, ServerResources } from './pterodactyl_api.js';
 
@@ -77,23 +79,28 @@ export function buildServerControlComponents(
     return rows;
 }
 
-export function disableAllComponents(
-    components: any[]
-): (ActionRowBuilder<StringSelectMenuBuilder> | ActionRowBuilder<ButtonBuilder>)[] {
-    return components.map((row) => {
-        const actionRow = row as any;
-        const firstComponent = actionRow.components[0];
-        const componentType = firstComponent.type ?? firstComponent.data?.type;
+export type ControlRow = ActionRowBuilder<MessageActionRowComponentBuilder>;
+type ApiControlRow = APIActionRowComponent<APIComponentInMessageActionRow>;
 
-        if (componentType === ComponentType.StringSelect) {
-            const newRow = new ActionRowBuilder<StringSelectMenuBuilder>();
-            newRow.addComponents(StringSelectMenuBuilder.from(firstComponent).setDisabled(true));
-            return newRow;
-        } else if (componentType === ComponentType.Button) {
+/** Disables buttons and string selects; empty or unsupported rows are returned untouched. */
+export function disableAllComponents(components: ControlRow[]): ControlRow[];
+export function disableAllComponents(components: (ControlRow | ApiControlRow)[]): (ControlRow | ApiControlRow)[];
+export function disableAllComponents(components: (ControlRow | ApiControlRow)[]): (ControlRow | ApiControlRow)[] {
+    return components.map((row) => {
+        const data = row instanceof ActionRowBuilder ? row.toJSON() : row;
+        const firstComponent = data.components[0];
+        if (!firstComponent) return row;
+        if (firstComponent.type === ComponentType.StringSelect) {
+            return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                StringSelectMenuBuilder.from(firstComponent).setDisabled(true)
+            );
+        }
+        if (firstComponent.type === ComponentType.Button) {
             const newRow = new ActionRowBuilder<ButtonBuilder>();
-            actionRow.components.forEach((component: APIButtonComponent) => {
+            for (const component of data.components) {
+                if (component.type !== ComponentType.Button) return row;
                 newRow.addComponents(ButtonBuilder.from(component).setDisabled(true));
-            });
+            }
             return newRow;
         }
         return row;

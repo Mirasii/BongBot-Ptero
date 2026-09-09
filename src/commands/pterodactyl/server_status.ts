@@ -5,7 +5,6 @@ import {
     ButtonInteraction,
     ComponentType,
     Message,
-    MessageActionRowComponentBuilder,
     StringSelectMenuInteraction,
 } from 'discord.js';
 import type { PterodactylServer } from './shared/pterodactyl_api.js';
@@ -19,7 +18,7 @@ import {
 } from './shared/pterodactyl_api.js';
 import { buildServerStatusEmbed } from './shared/server_status_embed.js';
 import { buildServerControlComponents, disableAllComponents } from './shared/server_control_components.js';
-import type { InteractionEditReplyOptions } from 'discord.js';
+import type { ControlRow } from './shared/server_control_components.js';
 import type { Logger } from '@pookiesoft/bongbot-core';
 const ACTION_POLL_INTERVAL_MS = 500;
 const ACTION_TIMEOUT_MS = 60000;
@@ -93,7 +92,7 @@ export default class ServerStatus {
         const controller = new AbortController();
         let busy = false;
         let latestEmbed = message.embeds?.[0] ? EmbedBuilder.from(message.embeds[0]) : undefined;
-        let latestComponents: ManageActionRow[] = message.components
+        let latestComponents: ControlRow[] = message.components
             .filter(isActionRow)
             .map((row) => ActionRowBuilder.from(row));
         let pendingEdit: Promise<unknown> = Promise.resolve();
@@ -114,11 +113,7 @@ export default class ServerStatus {
                 }
                 if (options.embeds?.[0]) latestEmbed = EmbedBuilder.from(options.embeds[0]);
                 if (options.components) {
-                    latestComponents = options.components.map((row) =>
-                        row instanceof ActionRowBuilder
-                            ? (row as ManageActionRow)
-                            : ActionRowBuilder.from(row as ApiActionRow)
-                    );
+                    latestComponents = options.components;
                 }
             },
         };
@@ -149,15 +144,6 @@ export default class ServerStatus {
                 const parsed = this.parseComponentInteraction(componentInteraction);
                 dbServerId = parsed.dbServerId;
                 const { identifier, action } = parsed;
-                const replyMessage = this.getActionMessage(action, identifier);
-
-                await componentInteraction.followUp({ content: replyMessage, ephemeral: true });
-
-                await view.edit(componentInteraction, {
-                    ...(latestEmbed ? { embeds: [EmbedBuilder.from(latestEmbed).setDescription(replyMessage)] } : {}),
-                    components: disableAllComponents(latestComponents),
-                });
-
                 const dbServer = this.db.getServerById(parseInt(dbServerId));
 
                 if (!dbServer || !dbServer.id) {
@@ -167,6 +153,14 @@ export default class ServerStatus {
                     });
                     return;
                 }
+
+                const replyMessage = this.getActionMessage(action, identifier);
+                await componentInteraction.followUp({ content: replyMessage, ephemeral: true });
+
+                await view.edit(componentInteraction, {
+                    ...(latestEmbed ? { embeds: [EmbedBuilder.from(latestEmbed).setDescription(replyMessage)] } : {}),
+                    components: disableAllComponents(latestComponents),
+                });
 
                 if (view.signal.aborted) return;
                 await this.handleServerAction(
@@ -195,6 +189,7 @@ export default class ServerStatus {
 
         collector.on('end', async () => {
             controller.abort();
+            // The action handler owns edit errors; cleanup must still remove controls after a rejected edit.
             await pendingEdit.catch(() => {});
             await message.edit({ components: [] }).catch((error) => {
                 this._logger.error(error, interaction);
@@ -290,8 +285,10 @@ export default class ServerStatus {
             const pending = !complete && !timedOut;
             let status: string;
             if (pending) status = this.getActionMessage(action, identifier);
-            else if (timedOut) status = '⚠️ Timed out waiting for the action. Completion could not be confirmed.';
-            else status = identifiers.length ? 'Action completed.' : 'No server actions completed.';
+            else if (complete) status = identifiers.length ? 'Action completed.' : 'No server actions completed.';
+            else
+                status =
+                    '⚠️ Status monitoring ended after 60 seconds. Completion could not be confirmed. Run /pterodactyl manage to check again.';
             const description = [failureMessage, status].filter(Boolean).join('\n');
             const display = JSON.stringify([description, [...states.values()]]);
             if (display !== previousDisplay) {
@@ -341,10 +338,9 @@ export default class ServerStatus {
 }
 
 type ValidatedDbServer = DbPterodactylServer & { id: number };
-type ApiActionRow = Extract<Message['components'][number], { type: ComponentType.ActionRow }>;
-type ManageActionRow = ActionRowBuilder<MessageActionRowComponentBuilder>;
+type MessageActionRow = Extract<Message['components'][number], { type: ComponentType.ActionRow }>;
 
-function isActionRow(component: Message['components'][number]): component is ApiActionRow {
+function isActionRow(component: Message['components'][number]): component is MessageActionRow {
     return component.type === ComponentType.ActionRow;
 }
 
@@ -380,8 +376,10 @@ function waitForNextPoll(signal: AbortSignal, deadline: number): Promise<void> {
 
 interface ManageView {
     signal: AbortSignal;
-    edit: (
-        interaction: ButtonInteraction | StringSelectMenuInteraction,
-        options: InteractionEditReplyOptions
-    ) => Promise<void>;
+    edit: (interaction: ButtonInteraction | StringSelectMenuInteraction, options: ManageEditOptions) => Promise<void>;
+}
+
+interface ManageEditOptions {
+    embeds?: EmbedBuilder[];
+    components?: ControlRow[];
 }

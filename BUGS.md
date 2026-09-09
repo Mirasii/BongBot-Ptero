@@ -105,7 +105,7 @@ When stopping all servers, each `sendServerCommand()` fires immediately as a par
 const results = await Promise.all(targets.map((server) => sendServerCommand(...)));
 ```
 
-No throttling or backoff if Pterodactyl rate-limits the requests. This remains open. Manage status polling now reads unaffected servers once per action and polls only successful command targets; that removes the repeated whole-panel reads but does not solve bulk command rate limiting.
+No throttling or backoff if Pterodactyl rate-limits the requests. This remains open. Manage status polling now reads unaffected servers once per action and polls only successful command targets; that removes the repeated whole-panel reads but does not solve bulk command rate limiting. Bulk polling also fans out resource reads to every successful target every 500 ms (up to about 121 reads per target over 60 seconds with fast responses); read concurrency and backoff remain open.
 
 **Fix:** Limit concurrent requests (e.g. with `p-limit`) and add exponential backoff on 429 responses.
 

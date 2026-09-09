@@ -1,98 +1,44 @@
-# Issue #67: manage statuses remain stale after actions
+# Issue #67: manage status refresh and fifth review
 
-Issue: [Manage statuses do not automatically update after an action](https://github.com/PookieSoft/BongBot-Ptero/issues/67).
+Reviewed the fifth pass in `CLAUDE-REVIEW.md` against the current worktree on 9 September 2026. Claude found no correctness defect and confirmed the previous fixes. This document records the current behavior, the latest changes, and the design choices retained after review.
 
-Analysis date: 9 September 2026. Source revision: `90cf495e8fa70119f98c2bc066581fe01dc44044`.
+## Current behavior
 
-## Finding
+Manage actions update the original message from an awaited, sequential polling loop. Observed transitions appear while controls remain disabled. Completion restores valid controls and takes precedence over the deadline when the final read both reaches the target state and crosses sixty seconds. Restart requires a non-running observation followed by running for each successful target. Stop All retains individual progress and command-failure details.
 
-The main defect is in `ServerStatus.pollUntilStateChange`: it polls the API during an action but does not render those observations. It refreshes the manage message only when every affected server reaches the expected state or the attempt limit is reached. Restart also has a premature completion condition: the server can still report its original `running` state immediately after the command is accepted, which stops polling before the restart happens.
+The configuration lookup precedes both the pending-action follow-up and the disabling edit. A missing configuration produces only the error response, leaves the message untouched, and releases the action lock. A regression checks that a later valid action can complete.
 
-These are confirmed control-flow defects in the checked-out source. The issue does not identify the affected actions, wait duration, deployment revision, or runtime errors, so this analysis cannot establish which path occurred in the reporter's session. In particular, ordinary start/stop should eventually refresh if the target state is observed and the final fetch and message edit succeed; the code does not explain every possible case of a permanently stale view by itself.
+The collector normalizes Discord message rows into builders once and retains the latest successfully rendered embed and controls. Collector expiry cancels polling and removes controls after any outstanding message edit settles. Transient Discord 5xx edit failures receive one retry. The initial-edit regression checks the actual disabled controls, preserved embed fields and untouched source data.
 
-## Relevant code and cause
+## Fifth-pass findings
 
-- [`master.ts`](src/commands/pterodactyl/master.ts) routes `manage` to `ServerStatus` and exposes its collector setup.
-- [`server_status.ts:91–93`](src/commands/pterodactyl/server_status.ts#L91-L93) initially edits only the components to disable them. The old status embed remains visible.
-- [`server_status.ts:230–232`](src/commands/pterodactyl/server_status.ts#L230-L232) selects `running` as the target for both start and restart, without tracking whether a restart has begun.
-- [`server_status.ts:245–267`](src/commands/pterodactyl/server_status.ts#L245-L267) fetches resources and checks the target. `refreshStatus` is inside the completion/timeout branch, so intermediate `starting`, `stopping`, and individual completions during Stop All are never displayed.
-- [`server_status.ts:282–314`](src/commands/pterodactyl/server_status.ts#L282-L314) fetches a separate snapshot for the final render and rebuilds enabled controls. Fetch/edit failures are logged and swallowed, allowing polling to finish without a visible update.
-- [`server_status_embed.ts`](src/commands/pterodactyl/shared/server_status_embed.ts) already renders `starting` and `stopping`. The missing updates originate in the action/polling flow, not missing status formatting.
+1. **Component type names: fixed (N4/TS3).** The components module now exports `ControlRow`, which the manage view imports. The duplicate `ManageActionRow` alias is gone. The alias extracted from `Message['components']` is now `MessageActionRow`, distinguishing Discord class instances from `ApiControlRow`, the plain JSON shape.
 
-Under the review skill's rules, the missing transition rendering is G2 (expected behavior), and premature restart completion is G3/G21 (boundary conditions and algorithm correctness).
+2. **API-row overload and passthrough: retained, with the contract clarified.** Both production call sites pass builders. There is no current production API-row caller, and the earlier claim that existing callers required that shape was too broad. The helper's tested API JSON support remains useful as an explicit compatibility contract; absence of local callers alone does not justify removing it during a status-refresh fix. Discord message class instances are normalized separately at collector setup and are not claimed to match the API JSON overload.
 
-### Observable sequences
+    The review is also right that the helper's name can overpromise. Its documentation now states that it disables buttons and string selects and returns empty or unsupported rows untouched. Passthrough is intentional: the helper does not invent handling for unsupported controls or discard their data. The manage flow builds buttons and string selects, and its synchronous action lock guards concurrent interactions. Tests assert passthrough identity as well as disabled copies and source immutability for supported controls.
 
-| Action      | API observations after command acceptance           | Current display behavior                                                                                |
-| ----------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Start       | `offline → starting → running`                      | Original offline embed remains until running, followed by a separate refresh fetch.                     |
-| Stop        | `running → stopping → offline`                      | Original running embed remains until offline.                                                           |
-| Restart     | `running → stopping → offline → starting → running` | First running observation can terminate polling. The later transition and completion are not monitored. |
-| Stop All    | Servers reach offline at different times            | No progress is rendered until all successful command targets are offline or polling expires.            |
-| Slow action | Target not reached within 120 checks                | A single refresh occurs at the attempt limit; later completion is not monitored.                        |
+3. **Optimistic follow-up before validation: fixed (G2).** The pending-action response now follows the synchronous configuration guard. A missing row no longer produces “Starting…” immediately before “Server configuration not found.” The regression requires exactly one follow-up on that path, alongside its existing no-edit and lock-release checks.
 
-The first check is immediate; subsequent checks are scheduled every 500 ms. With fast requests the limit is reached after roughly 59.5 seconds, not a reliable wall-clock deadline.
+4. **Test readability and simulated read timing: fixed (N1/T5).** `pollingUpdates` names the operation that excludes the initial pending edit; the three duplicated slicing sequences are gone. `observeStates` applies its optional delay at the final supplied observation's read index, independently of the state value. A stop sequence beginning with `running` therefore cannot trigger the delay merely because it is running. The deadline cases still exercise the rendered completion outcome, enabled controls and timer cleanup. Moving the follow-up also exposed a stale error-notification test: it now rejects the first notification and asserts that the failure is logged without rejecting the action.
 
-### Related reliability defects
+5. **Smaller notes: deliberate behavior documented.** Non-target resources remain a single snapshot for the action, including the terminal render. For Stop All, every successfully commanded server is a polling target; the baseline applies to failed-command servers. Their displayed state can become stale while other servers are polled. A terminal-only refresh is possible, but adds requests and delays restored controls; no current defect establishes a need to change the accepted read-load tradeoff. Bulk command and resource-read rate limiting remain open in `BUGS.md` §2.4.
 
-`setInterval(async ...)` allows overlapping requests when a check takes longer than 500 ms. The polling method returns after installing the interval, so the caller's `await` does not cover its lifetime. Later callback failures do not flow into the action handler's catch block. The collector's ten-minute end handler removes controls but does not cancel polling; a later refresh can restore controls on an expired view. These problems are also noted in `BUGS.md` sections 1.1 and 1.4. They aggravate the issue but are not necessary to explain missing transition rendering.
+    The empty catch while awaiting `pendingEdit` now explains that the action handler owns edit errors and cleanup must still remove controls after rejection. Logging there would duplicate error ownership. Unchanged `CLAUDE.md` retains its unrelated formatting issue.
 
-`fetchServerResources` returns null on any fetch failure. Null prevents successful completion until the attempt limit, after which refresh may show unknown. A successful power request alone does not establish that the resulting state has been reached.
+## Retained design choices
 
-## Proposed fix
+The fifth review accepts the separate render sites: initial rendering and error recovery fetch fresh resources, while the action loop renders the exact snapshot used to judge completion. Combining them into a fetching render helper would obscure those different data lifetimes. The short status choice stays beside the completion and timeout calculations that also control polling and control availability.
 
-Keep the change focused on the manage action lifecycle in `server_status.ts`, with corresponding tests. Reuse the existing embed and component builders.
+The sixty-second monitoring window remains bounded. Its message says monitoring ended, completion could not be confirmed, and `/pterodactyl manage` can check again. A transitional state does not prove eventual success. The JSON display key remains a collision-resistant representation of the description and ordered states, and optional embed access remains appropriate for views without embed content. Claude explicitly accepted or withdrew the corresponding earlier findings; they require no further changes.
 
-1. Replace the detached interval with an awaited, sequential polling loop. Give it named polling/deadline settings, explicit completion, timeout, error and cancellation outcomes, and collector-owned cancellation. Allow only one active action per manage message; guard queued interactions as well as disabling controls.
-2. After command acceptance, show a pending-action description immediately while preserving the last observed state. Do not claim that the API has reported `starting` or `stopping` before it does. On each poll, render changed observed states while work remains pending. Use the same snapshot for rendering and completion checks, merging affected-server observations into the view's existing snapshot. Avoid fetching all resources a second time merely to render each poll, and avoid identical Discord edits on every tick.
-3. Keep controls disabled throughout the pending action. The current `refreshStatus` cannot simply be called unmodified every tick: it rebuilds enabled controls. Separate rendering from fetching and make control availability follow the action/collector lifecycle. On confirmed completion, render the final snapshot and restore valid controls only if the collector remains active.
-4. Track completion per affected server. Start completes at observed running; stop completes at observed offline. For restart, require evidence of the new lifecycle before accepting running: observe a non-running state followed by running, or use a validated new boot/uptime signal relative to a pre-command resource snapshot. The existing resource type exposes uptime, but its behavior must be verified against the deployed panel before relying on it. If polling misses the transition and no reliable restart evidence is available, report completion as unconfirmed at the deadline rather than immediately treating the original running state as success.
-5. For Stop All, display each server's progress independently and finish when every successfully commanded server has completed. Preserve failure reporting for unsuccessful commands; do not wait for those commands as though they succeeded.
-6. At the deadline, display the latest observations and explicitly say that completion could not be confirmed. Do not present timeout as success. Recover from transient resource errors within the deadline without interpreting null as a target state. Log and handle message-edit failures explicitly, with bounded retries where appropriate; stop when the message can no longer be updated.
-7. On collector end, cancel polling and prevent in-flight results from restoring controls. Coordinate the final component removal with any outstanding edit so it remains the last component update. Ensure all terminal paths release the action lock and scheduled work.
+## Validation and limits
 
-This supplies automatic updates during an action. Continuous idle monitoring and a new websocket subsystem are outside this fix. Polling can display observed transitions but cannot guarantee capturing states shorter than its sampling interval.
+- Full Jest suite: 174 tests passed across all 12 suites. This run exposed the stale notification mock described above; its corrected manage-suite rerun is recorded below.
+- Final manage-suite rerun: all 70 tests passed. `server_status.ts` has 100% line coverage, 97.38% statements, 94.28% branches and 97.22% functions. The full-suite run confirmed 100% across all four metrics for the shared control-component helper.
+- `node node_modules/typescript/bin/tsc --noEmit`: passed.
+- `npm run build`: passed.
+- `node node_modules/prettier/bin/prettier.cjs --check src tests BUGS.md fix.md`: passed.
+- `git diff --check`: passed.
 
-## Validation required when implementing
-
-Existing polling tests in [`server_status.test.ts:1035–1165`](tests/commands/pterodactyl/server_status.test.ts#L1035-L1165) assert only that `editReply` was called. The initial components-only edit already satisfies that assertion, even if no embed refresh occurs. They do not protect the expected behavior.
-
-Add deterministic tests using controlled resource sequences and fake timers, asserting actual embed content and control state:
-
-- Start and stop publish observed transition states before their terminal state, without another user interaction.
-- Restart ignores an initial running response, renders subsequent transitions, and only completes after evidence of the new lifecycle. Cover missed transitions and unconfirmed timeout.
-- Stop All renders one server offline while another is stopping; partial command failures remain visible and do not prevent successful targets from updating.
-- Slow requests never overlap; the action promise stays pending until the loop finishes.
-- Timeout and repeated resource failures produce an explicit unconfirmed outcome and clean up work.
-- Collector expiry during a request/edit prevents further polling and leaves controls removed.
-- Message-edit failures and rapid repeated interactions cannot leave an unhandled rejection, competing loops, or permanently held action lock.
-
-Then run the relevant Jest suites and project checks. Manually verify start, stop, restart and Stop All against a test panel, watching the original manage message through completion and timeout.
-
-## Analysis-stage work performed
-
-Read the issue and its empty comment history; traced command dispatch, action handling, resource fetching, polling, rendering and existing tests. This is static source analysis, not a live Discord/Pterodactyl reproduction. No implementation or test files were changed, and tests were not run for this documentation-only task. Existing unrelated workspace changes were left untouched.
-
-## Implementation follow-up
-
-Implementation was subsequently authorized on branch `fix/67-manage-status-refresh`. The final design keeps the action lifecycle in `server_status.ts`: single-server actions and Stop All share command submission and an awaited polling loop. No separate polling/state-management helper remains.
-
-The loop renders changed observations from the same resource snapshot used for completion checks, keeps controls disabled while pending, requires a non-running observation before confirming restart, and reports an unconfirmed outcome at timeout. A per-view action guard prevents concurrent actions. Collector expiry cancels scheduled polling, discards outstanding resource results, and removes controls after any outstanding edit finishes. Failed Stop All commands remain identified in the status description.
-
-Each action captures unaffected servers once and polls only successful action targets thereafter. Identical state/description snapshots do not trigger another Discord edit. Existing resource-fetch failures remain represented as unknown and are retried by subsequent polls. The polling deadline is checked between requests; the existing API layer does not expose cancellation of an outstanding HTTP request. A restart whose transition is too brief to observe is reported as unconfirmed at timeout; no assumption about uptime semantics was added.
-
-Validation includes TypeScript checking, the production build, and regression tests for displayed transitions, restart timeout, disabled controls, concurrent interactions, slow reads, collector expiry during an edit, and Stop All progress with partial failure. Live Discord/Pterodactyl verification remains outstanding.
-
-The completion audit also identified and fixed premature polling termination after a transient Discord edit failure. The existing view edit function now retries HTTP 5xx responses once, checks collector cancellation before retrying, and propagates persistent failures to the existing error handler. Regression tests verify recovery through action completion, bounded persistent failures with action-lock release, and explicit timeout after repeated resource failures. All 64 manage tests, TypeScript checking, and the production build pass after this increment. The previously verified component and command-dispatch suites are unchanged.
-
-The remaining manual check requires an identified disposable Discord/Pterodactyl environment. No live power commands have been issued during this work.
-
-## Review follow-up
-
-The code review identified two real state and load issues. Polling now captures unaffected server resources once and polls only successful action targets. The collector keeps the last rendered embed and components, so a later action starts from the current view instead of the original command response. Bulk command failures are logged again, and the open rate-limit TODO remains in the source and in `BUGS.md`.
-
-The review's earlier helper-class suggestion was not adopted. That method owns one action lifecycle and a collaborator would need the server, interaction, caller, and view state passed through several layers. The pure pieces that do not need that state are extracted as `isActionComplete` and `waitForNextPoll`; command dispatch, snapshot polling, and rendering remain together so their ordering is visible.
-
-The component boundary now normalizes Discord message rows into action-row builders once, and the shared disabling helper accepts those builders while retaining compatibility with API rows used by existing callers. The collector has both an absolute ten-minute and five-minute idle timeout. The dead restart comparison, bulk restart coupling, nested failure-message expression, collector timeout literal, and silent follow-up catch were addressed. Tests cover target-only polling, consecutive actions, per-target restart evidence, builder-row disabling, failure logging, and the existing cancellation paths.
-
-The third review proposed narrowing `disableAllComponents` to builders only. I did not make that change: the helper is exported and its existing suite deliberately exercises API-shaped rows, so narrowing it would turn a compatibility helper into a breaking internal contract. The managed view now normalizes its own Discord message boundary and passes builders in production. The helper retains the small shape check because it supports both documented input forms; the behavior is covered by its own API-row and builder-row tests.
+Checks use the installed Node entry points for Jest, TypeScript and Prettier to avoid the broken executable shims. No live Discord/Pterodactyl power commands were issued. Deployment-specific timing has not been manually verified. The deadline is checked between requests and cannot cancel an outstanding HTTP request; polling may miss a brief restart transition and report completion as unconfirmed. There is no continuous idle monitoring.

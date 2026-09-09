@@ -6,7 +6,7 @@ process.env.PTERODACTYL_ALLOWED_HOSTS = 'panel.example.com';
 
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-import { Message } from 'discord.js';
+import { Message, ComponentType, ButtonStyle } from 'discord.js';
 
 const testServerUrl = 'https://panel.example.com';
 const testApiKey = 'test-api-key';
@@ -465,12 +465,16 @@ describe('server_status command', () => {
                         collectorCallbacks[event] = callback;
                     }),
                 }),
+                embeds: [{ title: 'Original status', fields: [{ name: 'Server', value: '🟢 **Status:** running' }] }],
                 components: [
                     {
+                        type: ComponentType.ActionRow,
                         components: [
                             {
                                 type: 2,
-                                customId: 'server_control:1:server-123:stop',
+                                custom_id: 'server_control:1:server-123:stop',
+                                label: 'Stop',
+                                style: ButtonStyle.Danger,
                             },
                         ],
                     },
@@ -491,14 +495,26 @@ describe('server_status command', () => {
             };
         }
 
-        function observeStates(states: string[]) {
+        function pollingUpdates(component: ReturnType<typeof actionInteraction>) {
+            return component.editReply.mock.calls
+                .slice(1)
+                .map(([options]) => options)
+                .filter((options) => options.embeds);
+        }
+
+        function observeStates(states: string[], finalObservationDelay = 0) {
             let index = 0;
             const originalGet = caller.get.bind(caller);
             jest.spyOn(caller, 'get').mockImplementation(async (...args) => {
                 if (!args[1].endsWith('/resources')) return originalGet(...args);
+                const readIndex = index++;
+                const state = states[Math.min(readIndex, states.length - 1)];
+                if (readIndex === states.length - 1 && finalObservationDelay) {
+                    jest.setSystemTime(Date.now() + finalObservationDelay);
+                }
                 return {
                     attributes: {
-                        current_state: states[Math.min(index++, states.length - 1)],
+                        current_state: state,
                         resources: { memory_bytes: 0, cpu_absolute: 0, disk_bytes: 0, uptime: 0 },
                     },
                 };
@@ -514,9 +530,7 @@ describe('server_status command', () => {
             await setupCollector(mockInteraction, mockMessage);
             const component = actionInteraction(action);
             await finishAction(collectorCallbacks.collect(component));
-            const updates = component.editReply.mock.calls
-                .map(([options]) => options)
-                .filter((options) => options.embeds);
+            const updates = pollingUpdates(component);
             expect(
                 updates.map((options) => options.embeds[0].data.fields[0].value.match(/Status:\*\* (\w+)/)[1])
             ).toEqual(states);
@@ -534,6 +548,36 @@ describe('server_status command', () => {
                     .components.flatMap((row: any) => row.components)
                     .every((control: any) => !control.data.disabled)
             ).toBe(true);
+        });
+
+        it('disables copies of the live controls and preserves the initial embed', async () => {
+            observeStates(['running']);
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('start');
+            await finishAction(collectorCallbacks.collect(component));
+            const initial = component.editReply.mock.calls[0][0];
+            expect(initial.embeds[0].data.title).toBe('Original status');
+            expect(initial.embeds[0].data.fields).toEqual(mockMessage.embeds[0].fields);
+            expect(initial.embeds[0].data.description).toContain('Starting');
+            expect(initial.components[0].toJSON().components).toEqual([
+                { ...mockMessage.components[0].components[0], disabled: true },
+            ]);
+            expect(mockMessage.components[0].components[0].disabled).toBeUndefined();
+        });
+
+        it.each([0, 1000])('reports completion at or beyond the deadline (read delay %i ms)', async (delay) => {
+            observeStates([...Array(120).fill('starting'), 'running'], delay);
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('start');
+            await finishAction(collectorCallbacks.collect(component));
+            expect(component.editReply.mock.calls.at(-1)?.[0].embeds[0].data.description).toBe('Action completed.');
+            expect(
+                component.editReply.mock.calls
+                    .at(-1)?.[0]
+                    .components.flatMap((row: any) => row.components)
+                    .every((control: any) => !control.data.disabled)
+            ).toBe(true);
+            expect(jest.getTimerCount()).toBe(0);
         });
 
         it('polls only the action target and preserves unrelated server snapshots', async () => {
@@ -586,9 +630,7 @@ describe('server_status command', () => {
             await setupCollector(mockInteraction, mockMessage);
             const component = actionInteraction('restart');
             await finishAction(collectorCallbacks.collect(component));
-            const updates = component.editReply.mock.calls
-                .map(([options]) => options)
-                .filter((options) => options.embeds);
+            const updates = pollingUpdates(component);
             expect(updates).toHaveLength(2);
             expect(updates[1].embeds[0].data.description).toContain('Completion could not be confirmed');
             expect(jest.getTimerCount()).toBe(0);
@@ -733,9 +775,7 @@ describe('server_status command', () => {
             const component = actionInteraction('stop');
             component.customId = 'server_control:1:all:stop';
             await finishAction(collectorCallbacks.collect(component));
-            const updates = component.editReply.mock.calls
-                .map(([options]) => options)
-                .filter((options) => options.embeds);
+            const updates = pollingUpdates(component);
             expect(updates).toHaveLength(2);
             expect(updates[0].embeds[0].data.fields.map((field: any) => field.value)).toEqual([
                 expect.stringContaining('offline'),
@@ -971,11 +1011,20 @@ describe('server_status command', () => {
 
             await finishAction(collectorCallbacks['collect'](mockButtonInteraction));
 
+            expect(mockButtonInteraction.followUp).toHaveBeenCalledTimes(1);
+            expect(mockButtonInteraction.editReply).not.toHaveBeenCalled();
+            expect(mockMessage.components[0].components[0].disabled).toBeUndefined();
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
                     content: '❌ Server configuration not found.',
                 })
             );
+            mockGetServerById.mockReturnValue({ id: 1, serverUrl: testServerUrl, apiKey: testApiKey });
+            observeStates(['running']);
+            const retry = actionInteraction('start');
+            await finishAction(collectorCallbacks.collect(retry));
+            expect(retry.deferUpdate).toHaveBeenCalledTimes(1);
+            expect(retry.editReply.mock.calls.at(-1)?.[0].embeds[0].data.description).toBe('Action completed.');
         });
 
         it('should handle collector error gracefully', async () => {
@@ -1690,7 +1739,7 @@ describe('server_status command', () => {
             expect(testMockMessage.createMessageComponentCollector).not.toHaveBeenCalled();
         });
 
-        it('should handle followUp error in catch block silently', async () => {
+        it('logs a failed error notification without rejecting the action', async () => {
             mockGetServerById.mockImplementation(() => {
                 throw new Error('Database error');
             });
@@ -1717,19 +1766,19 @@ describe('server_status command', () => {
 
             setupCollector(mockInteraction, testMockMessage);
 
+            const notificationError = new Error('followUp failed');
             const mockButtonInteraction = {
                 user: { id: 'test-user-123' },
                 isStringSelectMenu: () => false,
                 customId: 'server_control:1:server-123:start',
                 deferUpdate: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
-                followUp: jest
-                    .fn<() => Promise<any>>()
-                    .mockResolvedValueOnce(undefined)
-                    .mockRejectedValueOnce(new Error('followUp failed')),
+                followUp: jest.fn<() => Promise<void>>().mockRejectedValueOnce(notificationError),
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
             await expect(finishAction(localCallbacks['collect'](mockButtonInteraction))).resolves.not.toThrow();
+            expect(mockLogger.error).toHaveBeenCalledWith(notificationError, mockInteraction);
+            expect(mockButtonInteraction.followUp).toHaveBeenCalledTimes(1);
         });
 
         it('should handle error with undefined dbServerId (no refreshStatus call)', async () => {

@@ -1,5 +1,6 @@
 import { jest } from '@jest/globals';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder } from 'discord.js';
+import type { APIActionRowComponent, APIComponentInMessageActionRow } from 'discord.js';
 import {
     buildServerControlComponents,
     disableAllComponents,
@@ -160,137 +161,68 @@ describe('serverControlComponents', () => {
     });
 
     describe('disableAllComponents', () => {
-        it('disables builder rows as well as API component rows', () => {
-            const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-                new ButtonBuilder().setCustomId('test-button').setLabel('Test').setStyle(ButtonStyle.Primary)
+        function buttonRow() {
+            return new ActionRowBuilder<ButtonBuilder>().addComponents(
+                new ButtonBuilder().setCustomId('first').setLabel('First').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId('second').setLabel('Second').setStyle(ButtonStyle.Danger)
             );
+        }
 
-            const [disabledRow] = disableAllComponents([row]);
+        function selectRow() {
+            return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+                new StringSelectMenuBuilder().setCustomId('select').addOptions({ label: 'Option', value: 'option' })
+            );
+        }
 
-            expect(disabledRow.components[0].data.disabled).toBe(true);
+        it('disables builder controls without mutating the originals', () => {
+            const rows = [buttonRow(), selectRow()];
+            const original = rows.map((row) => row.toJSON());
+            const disabled = disableAllComponents(rows);
+            expect(disabled.map((row) => row.toJSON())).toEqual(
+                original.map((row) => ({
+                    ...row,
+                    components: row.components.map((component) => ({ ...component, disabled: true })),
+                }))
+            );
+            expect(rows.map((row) => row.toJSON())).toEqual(original);
         });
 
-        it('should disable StringSelect components', () => {
-            const mockSelectComponent = {
-                type: ComponentType.StringSelect,
-                data: {
-                    custom_id: 'test-select',
-                    options: [{ label: 'Option 1', value: 'opt1' }],
-                },
-                toJSON: () => ({
-                    type: ComponentType.StringSelect,
-                    custom_id: 'test-select',
-                    options: [{ label: 'Option 1', value: 'opt1' }],
-                }),
-            };
-
-            const mockRow = {
-                components: [mockSelectComponent],
-            };
-
-            const result = disableAllComponents([mockRow]);
-
-            expect(result.length).toBe(1);
+        it('disables API controls without mutating the originals', () => {
+            const rows = [buttonRow().toJSON(), selectRow().toJSON()];
+            const original = structuredClone(rows);
+            const disabled = disableAllComponents(rows);
+            expect(disabled.map((row) => (row instanceof ActionRowBuilder ? row.toJSON() : row))).toEqual(
+                original.map((row) => ({
+                    ...row,
+                    components: row.components.map((component) => ({ ...component, disabled: true })),
+                }))
+            );
+            expect(rows).toEqual(original);
         });
 
-        it('should disable Button components', () => {
-            const mockButtonComponent = {
-                type: ComponentType.Button,
-                data: {
-                    custom_id: 'test-button',
-                    label: 'Test Button',
-                    style: 4,
-                },
-                toJSON: () => ({
-                    type: ComponentType.Button,
-                    custom_id: 'test-button',
-                    label: 'Test Button',
-                    style: 4,
-                }),
-            };
-
-            const mockRow = {
-                components: [mockButtonComponent],
-            };
-
-            const result = disableAllComponents([mockRow]);
-
-            expect(result.length).toBe(1);
+        it('preserves empty API rows', () => {
+            const row = { type: ComponentType.ActionRow as const, components: [] };
+            expect(disableAllComponents([row])[0]).toBe(row);
         });
 
-        it('should handle multiple buttons in a row', () => {
-            const createButton = (id: string) => ({
-                type: ComponentType.Button,
-                data: {
-                    custom_id: id,
-                    label: `Button ${id}`,
-                    style: 4,
-                },
-                toJSON: () => ({
-                    type: ComponentType.Button,
-                    custom_id: id,
-                    label: `Button ${id}`,
-                    style: 4,
-                }),
-            });
-
-            const mockRow = {
-                components: [createButton('btn1'), createButton('btn2'), createButton('btn3')],
-            };
-
-            const result = disableAllComponents([mockRow]);
-
-            expect(result.length).toBe(1);
+        it('preserves unsupported rows received at runtime', () => {
+            const row = {
+                type: ComponentType.ActionRow,
+                components: [{ type: 999 }],
+            } as unknown as APIActionRowComponent<APIComponentInMessageActionRow>;
+            expect(disableAllComponents([row])[0]).toBe(row);
         });
 
-        it('should return row as-is for unknown component types', () => {
-            const mockUnknownComponent = {
-                type: 999,
-                data: {
-                    custom_id: 'test-unknown',
-                },
+        it('preserves malformed mixed rows received at runtime', () => {
+            const row = {
+                type: ComponentType.ActionRow as const,
+                components: [buttonRow().toJSON().components[0], selectRow().toJSON().components[0]],
             };
-
-            const mockRow = {
-                components: [mockUnknownComponent],
-            };
-
-            const result = disableAllComponents([mockRow]);
-
-            expect(result.length).toBe(1);
-            expect(result[0]).toBe(mockRow);
+            expect(disableAllComponents([row])[0]).toBe(row);
         });
 
-        it('should handle empty components array', () => {
-            const result = disableAllComponents([]);
-
-            expect(result).toEqual([]);
-        });
-
-        it('should handle mixed component types across rows', () => {
-            const mockSelectRow = {
-                components: [
-                    {
-                        type: ComponentType.StringSelect,
-                        data: { custom_id: 'select-1' },
-                        toJSON: () => ({ type: ComponentType.StringSelect, custom_id: 'select-1' }),
-                    },
-                ],
-            };
-
-            const mockButtonRow = {
-                components: [
-                    {
-                        type: ComponentType.Button,
-                        data: { custom_id: 'button-1', style: 4 },
-                        toJSON: () => ({ type: ComponentType.Button, custom_id: 'button-1', style: 4 }),
-                    },
-                ],
-            };
-
-            const result = disableAllComponents([mockSelectRow, mockButtonRow]);
-
-            expect(result.length).toBe(2);
+        it('handles no rows', () => {
+            expect(disableAllComponents([])).toEqual([]);
         });
     });
 });
