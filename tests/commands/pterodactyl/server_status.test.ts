@@ -1300,6 +1300,18 @@ describe('server_status command', () => {
             );
         });
 
+        it('returns without editing when refreshStatus cannot find the server', async () => {
+            mockGetServerById.mockReturnValue(null);
+            const editReply = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
+
+            await (serverStatusInstance as any).refreshStatus({ editReply }, 1, {
+                signal: new AbortController().signal,
+                edit: editReply,
+            });
+
+            expect(editReply).not.toHaveBeenCalled();
+        });
+
         it('should poll until state changes', async () => {
             let callCount = 0;
             server.use(
