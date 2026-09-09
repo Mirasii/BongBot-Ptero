@@ -570,6 +570,90 @@ describe('server_status command', () => {
             expect(jest.getTimerCount()).toBe(0);
         });
 
+        it('awaits slow resource reads without overlap and discards their results after expiry', async () => {
+            const originalGet = caller.get.bind(caller);
+            let finishRead!: (value: unknown) => void;
+            const resourceRead = jest.fn(
+                () =>
+                    new Promise((resolve) => {
+                        finishRead = resolve;
+                    })
+            );
+            jest.spyOn(caller, 'get').mockImplementation((...args) =>
+                args[1].endsWith('/resources') ? resourceRead() : originalGet(...args)
+            );
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('start');
+            let finished = false;
+            const pending = collectorCallbacks.collect(component).then(() => {
+                finished = true;
+            });
+            await jest.advanceTimersByTimeAsync(2000);
+            expect(resourceRead).toHaveBeenCalledTimes(1);
+            expect(finished).toBe(false);
+            await collectorCallbacks.end();
+            finishRead({ attributes: { current_state: 'running' } });
+            await pending;
+            expect(component.editReply).toHaveBeenCalledTimes(1);
+            expect(mockMessage.edit).toHaveBeenLastCalledWith({ components: [] });
+        });
+
+        it('removes controls after an outstanding edit finishes on expiry', async () => {
+            observeStates(['running']);
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('start');
+            let finishEdit!: () => void;
+            component.editReply.mockImplementationOnce(
+                () =>
+                    new Promise<void>((resolve) => {
+                        finishEdit = resolve;
+                    })
+            );
+            const pending = collectorCallbacks.collect(component);
+            await jest.advanceTimersByTimeAsync(0);
+            const ending = collectorCallbacks.end();
+            expect(mockMessage.edit).not.toHaveBeenCalled();
+            finishEdit();
+            await Promise.all([pending, ending]);
+            expect(component.editReply).toHaveBeenCalledTimes(1);
+            expect(mockMessage.edit).toHaveBeenLastCalledWith({ components: [] });
+            expect(jest.getTimerCount()).toBe(0);
+        });
+
+        it('renders individual Stop All progress and preserves failed command details', async () => {
+            const names = ['Fast', 'Slow', 'Failed'];
+            const reads = [0, 0, 0];
+            jest.spyOn(caller, 'get').mockImplementation(async (_url, path) => {
+                if (path === '/api/client')
+                    return {
+                        data: names.map((name, index) => ({ attributes: { name, identifier: `server-${index}` } })),
+                    };
+                const index = Number(path.split('/')[4].slice(-1));
+                const state = index === 0 || (index === 1 && reads[index]++ > 0) ? 'offline' : 'stopping';
+                return { attributes: { current_state: state } };
+            });
+            jest.spyOn(caller, 'post').mockImplementation(async (_url, path) => {
+                if (path.includes('server-2')) throw new Error('Command failed');
+                return {};
+            });
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('stop');
+            component.customId = 'server_control:1:all:stop';
+            await finishAction(collectorCallbacks.collect(component));
+            const updates = component.editReply.mock.calls
+                .map(([options]) => options)
+                .filter((options) => options.embeds);
+            expect(updates).toHaveLength(2);
+            expect(updates[0].embeds[0].data.fields.map((field: any) => field.value)).toEqual([
+                expect.stringContaining('offline'),
+                expect.stringContaining('stopping'),
+                expect.stringContaining('stopping'),
+            ]);
+            expect(updates[1].embeds[0].data.description).toContain('Failed to stop 1 server(s): Failed');
+            expect(updates[1].embeds[0].data.description).toContain('Action completed.');
+            expect(jest.getTimerCount()).toBe(0);
+        });
+
         it('should setup a collector with correct timeout', () => {
             setupCollector(mockInteraction, mockMessage);
 
