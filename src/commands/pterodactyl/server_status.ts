@@ -159,7 +159,7 @@ export default class ServerStatus {
         identifier: string,
         action: ActionType
     ): Promise<void> {
-        const servers = this.stateManager.managedServers();
+        const servers = this.stateManager.targets(identifier);
         const refreshedResources = await fetchAllServerResources(
             this.caller,
             servers,
@@ -206,7 +206,7 @@ export default class ServerStatus {
         try {
             await this.pollUntilComplete(componentInteraction, dbServer, { action, identifier, failureMessage });
         } finally {
-            this.stateManager.clearActions();
+            this.stateManager.clearActions(this.stateManager.targets(identifier));
         }
     }
 
@@ -220,10 +220,7 @@ export default class ServerStatus {
         const watching = this.stateManager.isWatching();
         let lastRender = '';
 
-        for (;;) {
-            if (this.cancelled) {
-                return;
-            }
+        while (!this.cancelled) {
             const servers = this.stateManager.managedServers();
             const resources = await fetchAllServerResources(this.caller, servers, dbServer.serverUrl, dbServer.apiKey);
             this.stateManager.observeAll(resources);
@@ -302,4 +299,3 @@ async function ephemeralFollowup(
         ephemeral: true,
     });
 }
-

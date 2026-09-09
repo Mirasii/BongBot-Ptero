@@ -38,8 +38,8 @@ export class StateManager {
         this.states.get(identifier)?.track(action);
     }
 
-    clearActions(): void {
-        this.states.forEach((state) => state.clearAction());
+    clearActions(targets: PterodactylServer[]): void {
+        targets.forEach((target) => this.states.get(target.attributes.identifier)?.clearAction());
     }
 
     observeAll(resources: (ServerResources | null)[]): void {
