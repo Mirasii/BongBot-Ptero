@@ -7,8 +7,7 @@ export async function fetchServers(caller: Caller, serverUrl: string, apiKey: st
     return json.data;
 }
 
-// TODO: [BUGS 3.1] All errors collapse to null — callers can't distinguish network/auth/notfound.
-//   Consider returning a discriminated union (e.g. { status: 'ok', data } | { status: 'error', code, message }).
+// TODO: Preserve resource failure reasons: https://github.com/PookieSoft/BongBot-Ptero/issues/74
 export async function fetchServerResources(
     caller: Caller,
     identifier: string,

@@ -197,7 +197,7 @@ export default class ServerStatus {
         });
     }
 
-    // TODO: [BUGS 3.2 / ARCHITECTURE 4.3] Validate split length before destructuring; consider a ComponentIdParser utility
+    // TODO: Validate component identifiers: https://github.com/PookieSoft/BongBot-Ptero/issues/75
     private parseComponentInteraction(componentInteraction: ButtonInteraction | StringSelectMenuInteraction): {
         dbServerId: string;
         identifier: string;
@@ -229,7 +229,7 @@ export default class ServerStatus {
         if (view.signal.aborted) return;
         const targets =
             identifier === 'all' ? servers : servers.filter((server) => server.attributes.identifier === identifier);
-        // TODO: Limit bulk command concurrency and back off on rate limits; see BUGS.md section 2.4.
+        // TODO: Bound command/read concurrency and handle rate limits: https://github.com/PookieSoft/BongBot-Ptero/issues/73
         const results = await Promise.all(
             targets.map(async (server) => ({
                 server,

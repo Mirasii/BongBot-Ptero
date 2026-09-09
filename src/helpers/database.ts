@@ -114,7 +114,7 @@ export default class Database {
         return server;
     }
 
-    // TODO: [BUGS 2.2] Decrypts all API keys eagerly on every query — consider deferring decryption until the key is needed
+    // TODO: Reduce unnecessary API-key decryption: https://github.com/PookieSoft/BongBot-Ptero/issues/71
     getServersByUserId(userId: string): PterodactylServer[] {
         const stmt = this.db.prepare('SELECT * FROM pterodactyl_servers WHERE userId = ?');
         let servers = stmt.all(userId) as PterodactylServer[];

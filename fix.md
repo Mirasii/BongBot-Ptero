@@ -22,7 +22,7 @@ The collector normalizes Discord message rows into builders once and retains the
 
 4. **Test readability and simulated read timing: fixed (N1/T5).** `pollingUpdates` names the operation that excludes the initial pending edit; the three duplicated slicing sequences are gone. `observeStates` applies its optional delay at the final supplied observation's read index, independently of the state value. A stop sequence beginning with `running` therefore cannot trigger the delay merely because it is running. The deadline cases still exercise the rendered completion outcome, enabled controls and timer cleanup. Moving the follow-up also exposed a stale error-notification test: it now rejects the first notification and asserts that the failure is logged without rejecting the action.
 
-5. **Smaller notes: deliberate behavior documented.** Non-target resources remain a single snapshot for the action, including the terminal render. For Stop All, every successfully commanded server is a polling target; the baseline applies to failed-command servers. Their displayed state can become stale while other servers are polled. A terminal-only refresh is possible, but adds requests and delays restored controls; no current defect establishes a need to change the accepted read-load tradeoff. Bulk command and resource-read rate limiting remain open in `BUGS.md` §2.4.
+5. **Smaller notes: deliberate behavior documented.** Non-target resources remain a single snapshot for the action, including the terminal render. For Stop All, every successfully commanded server is a polling target; the baseline applies to failed-command servers. Their displayed state can become stale while other servers are polled. A terminal-only refresh is possible, but adds requests and delays restored controls; no current defect establishes a need to change the accepted read-load tradeoff. Bulk command and resource-read rate limiting remain open in [#73](https://github.com/PookieSoft/BongBot-Ptero/issues/73).
 
     The empty catch while awaiting `pendingEdit` now explains that the action handler owns edit errors and cleanup must still remove controls after rejection. Logging there would duplicate error ownership. Unchanged `CLAUDE.md` retains its unrelated formatting issue.
 
@@ -38,7 +38,23 @@ The sixty-second monitoring window remains bounded. Its message says monitoring 
 - Final manage-suite rerun: all 70 tests passed. `server_status.ts` has 100% line coverage, 97.38% statements, 94.28% branches and 97.22% functions. The full-suite run confirmed 100% across all four metrics for the shared control-component helper.
 - `node node_modules/typescript/bin/tsc --noEmit`: passed.
 - `npm run build`: passed.
-- `node node_modules/prettier/bin/prettier.cjs --check src tests BUGS.md fix.md`: passed.
+- `node node_modules/prettier/bin/prettier.cjs --check src tests fix.md`: passed.
 - `git diff --check`: passed.
 
 Checks use the installed Node entry points for Jest, TypeScript and Prettier to avoid the broken executable shims. No live Discord/Pterodactyl power commands were issued. Deployment-specific timing has not been manually verified. The deadline is checked between requests and cannot cancel an outstanding HTTP request; polling may miss a brief restart transition and report completion as unconfirmed. There is no continuous idle monitoring.
+
+## GitHub issue migration
+
+`BUGS.md` is retired. [PR #69](https://github.com/PookieSoft/BongBot-Ptero/pull/69) closes [#67](https://github.com/PookieSoft/BongBot-Ptero/issues/67), covering manage updates and the related polling, collector, error-logging and component fixes. The unresolved audit entries are tracked separately:
+
+| Former audit entry                               | GitHub issue                                                 |
+| ------------------------------------------------ | ------------------------------------------------------------ |
+| 2.1 Targeted server lookup                       | [#70](https://github.com/PookieSoft/BongBot-Ptero/issues/70) |
+| 2.2 Unnecessary API-key decryption               | [#71](https://github.com/PookieSoft/BongBot-Ptero/issues/71) |
+| 1.2 and 2.3 Deployment-message cleanup           | [#72](https://github.com/PookieSoft/BongBot-Ptero/issues/72) |
+| 2.4 Bulk command and resource-read rate limiting | [#73](https://github.com/PookieSoft/BongBot-Ptero/issues/73) |
+| 3.1 Resource-fetch failure reasons               | [#74](https://github.com/PookieSoft/BongBot-Ptero/issues/74) |
+| 3.2 Component identifier validation              | [#75](https://github.com/PookieSoft/BongBot-Ptero/issues/75) |
+| 4.1 Host-owned shutdown cleanup                  | [#76](https://github.com/PookieSoft/BongBot-Ptero/issues/76) |
+
+The deployment-message code now lives in core and already awaits deletions, but ignores individual rejected results and still scans recent history. Its issue records that current behavior. The decryption and shutdown issues omit unproven claims about noticeable latency and WAL data loss. These issues remain open after this PR; migration does not implement them. Source TODOs now link directly to their issues, and the README points contributors to GitHub Issues.

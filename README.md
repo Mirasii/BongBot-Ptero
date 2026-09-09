@@ -112,6 +112,10 @@ This project uses `@pookiesoft/bongbot-core` from GitHub Packages (private). You
     docker run --env-file .env --volume ./data:/app/data --volume ./logs:/app/logs bongbot-ptero
     ```
 
+## Issues
+
+Track bugs and follow-up work in [GitHub Issues](https://github.com/PookieSoft/BongBot-Ptero/issues).
+
 ## Contributing
 
 1. Create a feature branch: `git checkout -b feature-name`

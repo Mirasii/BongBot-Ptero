@@ -17,7 +17,7 @@ export default class UpdateServer {
             const apiKey = interaction.options.getString('api_key');
             const userId = interaction.user.id;
 
-            // TODO: [BUGS 2.1] O(n) lookup — add a getServerByName(userId, serverName) method to Database
+            // TODO: Query by user and server name: https://github.com/PookieSoft/BongBot-Ptero/issues/70
             const existingServers = this.db.getServersByUserId(userId);
             const existingServer = existingServers.find((s) => s.serverName === serverName);
 
