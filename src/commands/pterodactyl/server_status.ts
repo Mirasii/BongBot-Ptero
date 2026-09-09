@@ -20,6 +20,7 @@ import type { Logger } from '@pookiesoft/bongbot-core';
 const ACTION_POLL_INTERVAL_MS = 500;
 const ACTION_TIMEOUT_MS = 60000;
 const COLLECTOR_TIMEOUT_MS = 10 * 60 * 1000;
+const COLLECTOR_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
 export default class ServerStatus {
     private db: Database;
@@ -80,12 +81,15 @@ export default class ServerStatus {
         if (!('manage' === interaction.options.getSubcommand())) {
             return;
         }
-        const collector = message.createMessageComponentCollector({ time: COLLECTOR_TIMEOUT_MS });
+        const collector = message.createMessageComponentCollector({
+            time: COLLECTOR_TIMEOUT_MS,
+            idle: COLLECTOR_IDLE_TIMEOUT_MS,
+        });
 
         const controller = new AbortController();
         let busy = false;
         let latestEmbed = message.embeds?.[0] ? EmbedBuilder.from(message.embeds[0]) : undefined;
-        let latestComponents: any[] = message.components;
+        let latestComponents: Message['components'] = message.components;
         let pendingEdit: Promise<unknown> = Promise.resolve();
         const view: ManageView = {
             signal: controller.signal,
@@ -104,7 +108,7 @@ export default class ServerStatus {
                 }
                 if (options.embeds?.[0]) latestEmbed = EmbedBuilder.from(options.embeds[0]);
                 if (options.components) {
-                    latestComponents = options.components.map(serializeComponentRow);
+                    latestComponents = options.components as Message['components'];
                 }
             },
         };
@@ -247,33 +251,16 @@ export default class ServerStatus {
         if (failureMessage) await componentInteraction.followUp({ content: failureMessage, ephemeral: true });
 
         const targetIds = new Set(identifiers);
-        const baseline = await Promise.all(
-            servers.map((server) =>
-                targetIds.has(server.attributes.identifier)
-                    ? null
-                    : fetchServerResources(
-                          this.caller,
-                          server.attributes.identifier,
-                          dbServer.serverUrl,
-                          dbServer.apiKey
-                      )
-            )
-        );
+        const readResources = (server: (typeof servers)[number]) =>
+            fetchServerResources(this.caller, server.attributes.identifier, dbServer.serverUrl, dbServer.apiKey);
+        const isTarget = (server: (typeof servers)[number]) => targetIds.has(server.attributes.identifier);
+        const baseline = await Promise.all(servers.map((server) => (isTarget(server) ? null : readResources(server))));
         const deadline = Date.now() + ACTION_TIMEOUT_MS;
         const restartTransitions = new Set<string>();
         let previousDisplay = '';
         while (!view.signal.aborted) {
             const resources = await Promise.all(
-                servers.map((server, index) =>
-                    targetIds.has(server.attributes.identifier)
-                        ? fetchServerResources(
-                              this.caller,
-                              server.attributes.identifier,
-                              dbServer.serverUrl,
-                              dbServer.apiKey
-                          )
-                        : baseline[index]
-                )
+                servers.map((server, index) => (isTarget(server) ? readResources(server) : baseline[index]))
             );
             if (view.signal.aborted) return;
             const states = new Map(
@@ -286,35 +273,25 @@ export default class ServerStatus {
                 const state = states.get(id);
                 if (state && state !== 'running') restartTransitions.add(id);
             }
-            const complete =
-                identifiers.every((id) => states.get(id) === (action === 'stop' ? 'offline' : 'running')) &&
-                (action !== 'restart' || identifiers.every((id) => restartTransitions.has(id)));
+            const complete = isActionComplete(states, identifiers, action, restartTransitions);
             const timedOut = Date.now() >= deadline;
             const pending = !complete && !timedOut;
-            let status = identifiers.length ? 'Action completed.' : 'No server actions completed.';
+            let status: string;
             if (pending) status = this.getActionMessage(action, identifier);
-            else if (!complete) status = '⚠️ Timed out waiting for the action. Completion could not be confirmed.';
+            else if (timedOut) status = '⚠️ Timed out waiting for the action. Completion could not be confirmed.';
+            else status = identifiers.length ? 'Action completed.' : 'No server actions completed.';
             const description = [failureMessage, status].filter(Boolean).join('\n');
             const display = JSON.stringify([description, [...states.values()]]);
             if (display !== previousDisplay) {
                 const components = buildServerControlComponents(servers, resources, dbServer.id);
                 await view.edit(componentInteraction, {
                     embeds: [buildServerStatusEmbed(servers, resources, description)],
-                    components: pending ? disableAllComponents(components.map((row) => row.toJSON())) : components,
+                    components: pending ? disableAllComponents(components) : components,
                 });
                 previousDisplay = display;
             }
             if (!pending) return;
-            await new Promise<void>((resolve) => {
-                const finish = () => {
-                    clearTimeout(timer);
-                    view.signal.removeEventListener('abort', finish);
-                    resolve();
-                };
-                const timer = setTimeout(finish, Math.min(ACTION_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
-                view.signal.addEventListener('abort', finish, { once: true });
-                if (view.signal.aborted) finish();
-            });
+            await waitForNextPoll(view.signal, deadline);
         }
     }
 
@@ -359,13 +336,28 @@ function buildFailureMessage(action: string, identifier: string, names: string[]
     return '❌ Failed to control server.';
 }
 
-function serializeComponentRow(row: any): any {
-    if (!('toJSON' in row)) return row;
-    try {
-        return row.toJSON();
-    } catch {
-        return row;
-    }
+function isActionComplete(
+    states: Map<string, string | undefined>,
+    identifiers: string[],
+    action: string,
+    restartTransitions: Set<string>
+): boolean {
+    const targetState = action === 'stop' ? 'offline' : 'running';
+    if (!identifiers.every((id) => states.get(id) === targetState)) return false;
+    return action !== 'restart' || identifiers.every((id) => restartTransitions.has(id));
+}
+
+function waitForNextPoll(signal: AbortSignal, deadline: number): Promise<void> {
+    return new Promise((resolve) => {
+        const finish = () => {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', finish);
+            resolve();
+        };
+        const timer = setTimeout(finish, Math.min(ACTION_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
+        signal.addEventListener('abort', finish, { once: true });
+        if (signal.aborted) finish();
+    });
 }
 
 interface ManageView {

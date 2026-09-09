@@ -23,13 +23,13 @@ Under the review skill's rules, the missing transition rendering is G2 (expected
 
 ### Observable sequences
 
-| Action | API observations after command acceptance | Current display behavior |
-| --- | --- | --- |
-| Start | `offline → starting → running` | Original offline embed remains until running, followed by a separate refresh fetch. |
-| Stop | `running → stopping → offline` | Original running embed remains until offline. |
-| Restart | `running → stopping → offline → starting → running` | First running observation can terminate polling. The later transition and completion are not monitored. |
-| Stop All | Servers reach offline at different times | No progress is rendered until all successful command targets are offline or polling expires. |
-| Slow action | Target not reached within 120 checks | A single refresh occurs at the attempt limit; later completion is not monitored. |
+| Action      | API observations after command acceptance           | Current display behavior                                                                                |
+| ----------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Start       | `offline → starting → running`                      | Original offline embed remains until running, followed by a separate refresh fetch.                     |
+| Stop        | `running → stopping → offline`                      | Original running embed remains until offline.                                                           |
+| Restart     | `running → stopping → offline → starting → running` | First running observation can terminate polling. The later transition and completion are not monitored. |
+| Stop All    | Servers reach offline at different times            | No progress is rendered until all successful command targets are offline or polling expires.            |
+| Slow action | Target not reached within 120 checks                | A single refresh occurs at the attempt limit; later completion is not monitored.                        |
 
 The first check is immediate; subsequent checks are scheduled every 500 ms. With fast requests the limit is reached after roughly 59.5 seconds, not a reliable wall-clock deadline.
 

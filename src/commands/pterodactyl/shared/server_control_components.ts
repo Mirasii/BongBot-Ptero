@@ -83,12 +83,13 @@ export function disableAllComponents(
     return components.map((row) => {
         const actionRow = row as any;
         const firstComponent = actionRow.components[0];
+        const componentType = firstComponent.type ?? firstComponent.data?.type;
 
-        if (firstComponent.type === ComponentType.StringSelect) {
+        if (componentType === ComponentType.StringSelect) {
             const newRow = new ActionRowBuilder<StringSelectMenuBuilder>();
             newRow.addComponents(StringSelectMenuBuilder.from(firstComponent).setDisabled(true));
             return newRow;
-        } else if (firstComponent.type === ComponentType.Button) {
+        } else if (componentType === ComponentType.Button) {
             const newRow = new ActionRowBuilder<ButtonBuilder>();
             actionRow.components.forEach((component: APIButtonComponent) => {
                 newRow.addComponents(ButtonBuilder.from(component).setDisabled(true));

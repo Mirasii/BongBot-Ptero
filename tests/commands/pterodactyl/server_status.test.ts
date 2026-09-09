@@ -655,6 +655,12 @@ describe('server_status command', () => {
             expect(component.editReply).toHaveBeenCalledTimes(edits);
             expect(mockMessage.edit).toHaveBeenLastCalledWith({ components: [] });
             expect(jest.getTimerCount()).toBe(0);
+            const expired = actionInteraction('start');
+            await collectorCallbacks.collect(expired);
+            expect(expired.reply).toHaveBeenCalledWith({
+                content: 'This view has expired. Run /pterodactyl manage again.',
+                ephemeral: true,
+            });
         });
 
         it('awaits slow resource reads without overlap and discards their results after expiry', async () => {
@@ -747,6 +753,7 @@ describe('server_status command', () => {
 
             expect(mockMessage.createMessageComponentCollector).toHaveBeenCalledWith({
                 time: 600000,
+                idle: 300000,
             });
         });
 

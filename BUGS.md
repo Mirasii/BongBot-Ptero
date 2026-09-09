@@ -130,8 +130,7 @@ All failure modes — network errors, SSRF rejection, 401, 404, 500 — collapse
 
 ```typescript
 type ApiResult<T> =
-    | { status: 'ok'; data: T }
-    | { status: 'error'; code: 'network' | 'notfound' | 'auth'; message: string };
+    { status: 'ok'; data: T } | { status: 'error'; code: 'network' | 'notfound' | 'auth'; message: string };
 ```
 
 ---
@@ -184,7 +183,7 @@ process.on('SIGTERM', async () => {
 
 ---
 
-### 4.2 Collector Has No Idle Timeout
+### 4.2 Collector Has No Idle Timeout — resolved
 
 **Location**: `server_status.ts`
 **Severity**: MEDIUM
@@ -193,9 +192,9 @@ process.on('SIGTERM', async () => {
 const collector = message.createMessageComponentCollector({ time: 600000 });
 ```
 
-A collector always runs for the full 10 minutes even if the user stopped interacting after the first click. This keeps the collector and its closures in memory unnecessarily.
+A five-minute idle timeout now stops an inactive collector while retaining the ten-minute absolute limit.
 
-**Fix:** Add an idle timeout:
+The collector uses both limits:
 
 ```typescript
 message.createMessageComponentCollector({ time: 600000, idle: 300000 });
@@ -205,12 +204,11 @@ message.createMessageComponentCollector({ time: 600000, idle: 300000 });
 
 ## 5. Summary
 
-| Issue                                                   | Severity | Category         |
-| ------------------------------------------------------- | -------- | ---------------- |
-| Unawaited `message.delete()` in postDeploymentMessage   | HIGH     | Race Condition   |
-| O(n) server lookup by name                              | MEDIUM   | Performance      |
-| Synchronous crypto blocking event loop                  | MEDIUM   | Event Loop       |
-| All API errors collapse to `null`                       | MEDIUM   | Type Safety      |
-| No graceful shutdown handler                            | MEDIUM   | Resource Cleanup |
-| No idle timeout on collector                            | MEDIUM   | Resource Cleanup |
-| Unvalidated component interaction parsing               | LOW      | Type Safety      |
+| Issue                                                 | Severity | Category         |
+| ----------------------------------------------------- | -------- | ---------------- |
+| Unawaited `message.delete()` in postDeploymentMessage | HIGH     | Race Condition   |
+| O(n) server lookup by name                            | MEDIUM   | Performance      |
+| Synchronous crypto blocking event loop                | MEDIUM   | Event Loop       |
+| All API errors collapse to `null`                     | MEDIUM   | Type Safety      |
+| No graceful shutdown handler                          | MEDIUM   | Resource Cleanup |
+| Unvalidated component interaction parsing             | LOW      | Type Safety      |
