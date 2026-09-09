@@ -229,11 +229,10 @@ export default class ServerStatus {
             const pending = !complete && Date.now() < deadline;
 
             let status: string;
-            if (pending) status = this.getActionMessage(context.action, context.identifier);
-            else if (complete) status = watching ? '✅ Action complete.' : 'No server actions were sent.';
-            else
-                status = `⚠️ Stopped watching after ${ACTION_TIMEOUT_MS / 1000} seconds. Run \`/pterodactyl manage\` to check again.`;
-
+            status = `⚠️ Stopped watching after ${ACTION_TIMEOUT_MS / 1000} seconds. Run \`/pterodactyl manage\` to check again.`;
+            if (pending) { status = this.getActionMessage(context.action, context.identifier); }
+            else if (complete) { status = '✅ Action complete.'; }
+                
             const description = [context.failureMessage, status].filter(Boolean).join('\n');
             const render = [description, ...resources.map((r) => r?.attributes.current_state)].join('|');
             if (render !== lastRender) {
