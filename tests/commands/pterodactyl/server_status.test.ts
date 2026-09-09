@@ -94,6 +94,11 @@ const serverStatusInstance = new ServerStatus(mockDb as any, caller as any, mock
 const serverStatusExecute = serverStatusInstance.execute.bind(serverStatusInstance);
 const setupCollector = serverStatusInstance.setupCollector.bind(serverStatusInstance);
 
+async function finishAction(action: Promise<void>): Promise<void> {
+    await jest.advanceTimersByTimeAsync(61000);
+    await action;
+}
+
 describe('server_status command', () => {
     let mockInteraction: any;
 
@@ -474,6 +479,97 @@ describe('server_status command', () => {
             };
         });
 
+        function actionInteraction(action: string) {
+            return {
+                user: { id: 'test-user-123' },
+                isStringSelectMenu: () => false,
+                customId: `server_control:1:server-123:${action}`,
+                deferUpdate: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+                followUp: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+                reply: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+                editReply: jest.fn<(options: any) => Promise<void>>().mockResolvedValue(undefined),
+            };
+        }
+
+        function observeStates(states: string[]) {
+            let index = 0;
+            const originalGet = caller.get.bind(caller);
+            jest.spyOn(caller, 'get').mockImplementation(async (...args) => {
+                if (!args[1].endsWith('/resources')) return originalGet(...args);
+                return {
+                    attributes: {
+                        current_state: states[Math.min(index++, states.length - 1)],
+                        resources: { memory_bytes: 0, cpu_absolute: 0, disk_bytes: 0, uptime: 0 },
+                    },
+                };
+            });
+        }
+
+        it.each([
+            ['start', ['offline', 'starting', 'running']],
+            ['stop', ['running', 'stopping', 'offline']],
+            ['restart', ['running', 'stopping', 'offline', 'starting', 'running']],
+        ])('renders observed %s transitions before enabling controls', async (action, states) => {
+            observeStates(states);
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction(action);
+            await finishAction(collectorCallbacks.collect(component));
+            const updates = component.editReply.mock.calls
+                .map(([options]) => options)
+                .filter((options) => options.embeds);
+            expect(
+                updates.map((options) => options.embeds[0].data.fields[0].value.match(/Status:\*\* (\w+)/)[1])
+            ).toEqual(states);
+            for (const update of updates.slice(0, -1)) {
+                expect(
+                    update.components
+                        .flatMap((row: any) => row.components)
+                        .every((control: any) => control.data.disabled)
+                ).toBe(true);
+            }
+            expect(updates.at(-1).embeds[0].data.description).toBe('Action completed.');
+            expect(
+                updates
+                    .at(-1)
+                    .components.flatMap((row: any) => row.components)
+                    .every((control: any) => !control.data.disabled)
+            ).toBe(true);
+        });
+
+        it('reports an unconfirmed restart and avoids duplicate pending edits', async () => {
+            observeStates(['running']);
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('restart');
+            await finishAction(collectorCallbacks.collect(component));
+            const updates = component.editReply.mock.calls
+                .map(([options]) => options)
+                .filter((options) => options.embeds);
+            expect(updates).toHaveLength(2);
+            expect(updates[1].embeds[0].data.description).toContain('Completion could not be confirmed');
+            expect(jest.getTimerCount()).toBe(0);
+        });
+
+        it('rejects a second action and cancels pending polling when the collector ends', async () => {
+            observeStates(['starting']);
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('start');
+            const pending = collectorCallbacks.collect(component);
+            await jest.advanceTimersByTimeAsync(500);
+            const second = actionInteraction('stop');
+            await collectorCallbacks.collect(second);
+            expect(second.reply).toHaveBeenCalledWith(
+                expect.objectContaining({ content: expect.stringContaining('already in progress') })
+            );
+            expect(second.deferUpdate).not.toHaveBeenCalled();
+            await collectorCallbacks.end();
+            await pending;
+            const edits = component.editReply.mock.calls.length;
+            await jest.advanceTimersByTimeAsync(1000);
+            expect(component.editReply).toHaveBeenCalledTimes(edits);
+            expect(mockMessage.edit).toHaveBeenLastCalledWith({ components: [] });
+            expect(jest.getTimerCount()).toBe(0);
+        });
+
         it('should setup a collector with correct timeout', () => {
             setupCollector(mockInteraction, mockMessage);
 
@@ -490,7 +586,7 @@ describe('server_status command', () => {
                 reply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockComponentInteraction);
+            await finishAction(collectorCallbacks['collect'](mockComponentInteraction));
 
             expect(mockComponentInteraction.reply).toHaveBeenCalledWith({
                 content: '❌ You cannot control servers for another user.',
@@ -510,7 +606,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockButtonInteraction);
+            await finishAction(collectorCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.deferUpdate).toHaveBeenCalled();
             expect(mockButtonInteraction.followUp).toHaveBeenCalled();
@@ -528,7 +624,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockSelectInteraction);
+            await finishAction(collectorCallbacks['collect'](mockSelectInteraction));
 
             expect(mockSelectInteraction.deferUpdate).toHaveBeenCalled();
             expect(mockSelectInteraction.followUp).toHaveBeenCalledWith(
@@ -550,7 +646,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockInteraction2);
+            await finishAction(collectorCallbacks['collect'](mockInteraction2));
 
             expect(mockInteraction2.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -571,7 +667,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockButtonInteraction);
+            await finishAction(collectorCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -615,7 +711,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockButtonInteraction);
+            await finishAction(collectorCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -643,7 +739,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockButtonInteraction);
+            await finishAction(collectorCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -671,7 +767,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockButtonInteraction);
+            await finishAction(collectorCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -694,7 +790,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockButtonInteraction);
+            await finishAction(collectorCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -719,7 +815,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await collectorCallbacks['collect'](mockButtonInteraction);
+            await finishAction(collectorCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -728,10 +824,10 @@ describe('server_status command', () => {
             );
         });
 
-        it('should clear components when collector ends', () => {
+        it('should clear components when collector ends', async () => {
             setupCollector(mockInteraction, mockMessage);
 
-            collectorCallbacks['end']();
+            await collectorCallbacks['end']();
 
             expect(mockMessage.edit).toHaveBeenCalledWith({
                 components: [],
@@ -745,7 +841,7 @@ describe('server_status command', () => {
 
             setupCollector(mockInteraction, mockMessage);
 
-            collectorCallbacks['end']();
+            await collectorCallbacks['end']();
 
             await jest.runAllTimersAsync();
 
@@ -801,7 +897,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await localCallbacks['collect'](mockButtonInteraction);
+            await finishAction(localCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.editReply).toHaveBeenCalled();
         });
@@ -884,7 +980,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await localCallbacks['collect'](mockButtonInteraction);
+            await finishAction(localCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -969,7 +1065,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await localCallbacks['collect'](mockButtonInteraction);
+            await finishAction(localCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.editReply).toHaveBeenCalled();
         });
@@ -1022,7 +1118,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await localCallbacks['collect'](mockButtonInteraction);
+            await finishAction(localCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.deferUpdate).toHaveBeenCalled();
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
@@ -1032,7 +1128,7 @@ describe('server_status command', () => {
             );
         });
 
-        it('should poll until state changes with setInterval', async () => {
+        it('should poll until state changes', async () => {
             let callCount = 0;
             server.use(
                 http.get(`${testServerUrl}/api/client/servers/:identifier/resources`, () => {
@@ -1100,12 +1196,12 @@ describe('server_status command', () => {
             await jest.advanceTimersByTimeAsync(500);
             await jest.advanceTimersByTimeAsync(500);
 
-            await collectPromise;
+            await finishAction(collectPromise);
 
             expect(mockButtonInteraction.editReply).toHaveBeenCalled();
         });
 
-        it('should handle poll timeout (max attempts reached)', async () => {
+        it('should handle poll timeout', async () => {
             server.use(
                 http.get(`${testServerUrl}/api/client/servers/:identifier/resources`, () => {
                     return HttpResponse.json({
@@ -1159,7 +1255,7 @@ describe('server_status command', () => {
                 await jest.advanceTimersByTimeAsync(500);
             }
 
-            await collectPromise;
+            await finishAction(collectPromise);
 
             expect(mockButtonInteraction.editReply).toHaveBeenCalled();
         });
@@ -1223,7 +1319,7 @@ describe('server_status command', () => {
             await jest.advanceTimersByTimeAsync(500);
             await jest.advanceTimersByTimeAsync(500);
 
-            await collectPromise;
+            await finishAction(collectPromise);
 
             expect(mockButtonInteraction.editReply).toHaveBeenCalled();
         });
@@ -1277,10 +1373,13 @@ describe('server_status command', () => {
                 customId: 'server_control:1:server-123:start',
                 deferUpdate: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
                 followUp: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
-                editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
+                editReply: jest
+                    .fn<() => Promise<undefined>>()
+                    .mockResolvedValueOnce(undefined)
+                    .mockRejectedValue(new Error('Edit failed')),
             };
 
-            await localCallbacks['collect'](mockButtonInteraction);
+            await finishAction(localCallbacks['collect'](mockButtonInteraction));
 
             expect(loggerSpy).toHaveBeenCalledWith(expect.any(Error));
             loggerSpy.mockRestore();
@@ -1318,7 +1417,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await localCallbacks['collect'](mockButtonInteraction);
+            await finishAction(localCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -1366,7 +1465,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await localCallbacks['collect'](mockButtonInteraction);
+            await finishAction(localCallbacks['collect'](mockButtonInteraction));
 
             expect(mockButtonInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -1439,7 +1538,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await expect(localCallbacks['collect'](mockButtonInteraction)).resolves.not.toThrow();
+            await expect(finishAction(localCallbacks['collect'](mockButtonInteraction))).resolves.not.toThrow();
         });
 
         it('should handle error with undefined dbServerId (no refreshStatus call)', async () => {
@@ -1469,7 +1568,7 @@ describe('server_status command', () => {
                 editReply: jest.fn<() => Promise<undefined>>().mockResolvedValue(undefined),
             };
 
-            await localCallbacks['collect'](mockSelectInteraction);
+            await finishAction(localCallbacks['collect'](mockSelectInteraction));
 
             expect(mockSelectInteraction.followUp).toHaveBeenCalledWith(
                 expect.objectContaining({
@@ -1530,7 +1629,7 @@ describe('server_status command', () => {
 
             await jest.advanceTimersByTimeAsync(500);
 
-            await collectPromise;
+            await finishAction(collectPromise);
 
             expect(mockButtonInteraction.editReply).toHaveBeenCalled();
         });
@@ -1589,7 +1688,7 @@ describe('server_status command', () => {
 
             await jest.advanceTimersByTimeAsync(500);
 
-            await collectPromise;
+            await finishAction(collectPromise);
 
             expect(mockButtonInteraction.editReply).toHaveBeenCalled();
         });
