@@ -2,20 +2,9 @@
 
 ## 1. Critical Correctness Issues
 
-### 1.1 Memory Leak in Message Component Collector
+### 1.1 Memory Leak in Message Component Collector — resolved
 
-**Location**: `server_status.ts`
-**Severity**: HIGH
-
-The `setupCollector` method creates a message component collector but `pollUntilStateChange` spawns `setInterval` callbacks that continue running even if the collector ends or an error occurs mid-action. There is no explicit mechanism to cancel pending intervals on error paths.
-
-**Impact:** Long-lived polling intervals can accumulate in memory, especially if multiple users trigger server status commands with failures.
-
-**Fix:**
-
-- Store interval IDs and clear them in the collector's `end` event handler
-- Use `collector.stop()` when max attempts are reached
-- Explicitly cancel all pending intervals before collector ends
+The manage action now awaits a sequential polling loop. Collector expiry aborts the pending delay and discards resource results that arrive after cancellation. Cleanup waits for an outstanding message edit before removing controls.
 
 ---
 
@@ -40,7 +29,7 @@ await Promise.allSettled(
 
 ---
 
-### 1.3 Empty Catch Handler in setupCollector
+### 1.3 Empty Catch Handler in setupCollector — resolved
 
 **Location**: `server_status.ts`
 **Severity**: MEDIUM
@@ -49,9 +38,9 @@ await Promise.allSettled(
 }).catch(() => {});
 ```
 
-This silently swallows errors from `componentInteraction.followUp()`, hiding failures such as network errors, rate limits, or expired interaction tokens.
+Errors from the error follow-up are now sent to the injected logger.
 
-**Fix:** Log the error at minimum:
+The handler logs the error:
 
 ```typescript
 .catch((error) => this._logger.error(error as Error));
@@ -59,42 +48,9 @@ This silently swallows errors from `componentInteraction.followUp()`, hiding fai
 
 ---
 
-### 1.4 Race Condition in pollUntilStateChange
+### 1.4 Race Condition in pollUntilStateChange — resolved
 
-**Location**: `server_status.ts`
-**Severity**: HIGH
-
-```typescript
-const pollInterval = setInterval(async () => {
-    const done = await checkStatus();
-    if (done) {
-        clearInterval(pollInterval);
-    }
-}, interval);
-```
-
-The method returns immediately after setting up the interval with no awaiting or tracking. If `checkStatus()` takes longer than 500ms, multiple overlapping calls queue up. There is also no max-attempts enforcement that accounts for slow async operations.
-
-**Impact:** Unbounded polling, excessive API calls to Pterodactyl, memory leak.
-
-**Fix:**
-
-```typescript
-private pollUntilStateChange(...): Promise<void> {
-    return new Promise((resolve) => {
-        let attempts = 0;
-        const interval = setInterval(async () => {
-            attempts++;
-            const done = await checkStatus();
-            if (done || attempts >= maxAttempts) {
-                clearInterval(interval);
-                resolve();
-            }
-        }, 500);
-        setTimeout(() => { clearInterval(interval); resolve(); }, 60000);
-    });
-}
-```
+The detached interval was removed. Each resource read and render finishes before the next delay begins, and the action promise covers the loop's lifetime. A named deadline replaces the attempt limit. An outstanding HTTP request still relies on the API client's timeout.
 
 ---
 
@@ -146,11 +102,10 @@ The bot fetches the last 100 messages on every `clientReady` event and runs mult
 When stopping all servers, each `sendServerCommand()` fires immediately as a parallel HTTP request:
 
 ```typescript
-const stopPromises = servers.map((server) => sendServerCommand(...));
-await Promise.allSettled(stopPromises);
+const results = await Promise.all(targets.map((server) => sendServerCommand(...)));
 ```
 
-No throttling or backoff if Pterodactyl rate-limits the requests.
+No throttling or backoff if Pterodactyl rate-limits the requests. This remains open. Manage status polling now reads unaffected servers once per action and polls only successful command targets; that removes the repeated whole-panel reads but does not solve bulk command rate limiting.
 
 **Fix:** Limit concurrent requests (e.g. with `p-limit`) and add exponential backoff on 429 responses.
 
@@ -202,20 +157,9 @@ const [dbServerId, identifier, action] = parts;
 
 ---
 
-### 3.3 Unsafe Type Cast After Promise.allSettled
+### 3.3 Unsafe Type Cast After Promise.allSettled — resolved
 
-**Location**: `server_status.ts`
-**Severity**: LOW
-
-```typescript
-const value = (result as PromiseFulfilledResult<...>).value;
-```
-
-Assumes all results are fulfilled. Use a proper type guard instead:
-
-```typescript
-if (result.status === 'fulfilled') { ... }
-```
+Bulk commands use `Promise.all` over `sendServerCommand`, which catches errors and returns a boolean. The fulfilled-result cast is no longer needed.
 
 ---
 
@@ -263,14 +207,10 @@ message.createMessageComponentCollector({ time: 600000, idle: 300000 });
 
 | Issue                                                   | Severity | Category         |
 | ------------------------------------------------------- | -------- | ---------------- |
-| `setInterval` not tracked/cleared on error in polling   | HIGH     | Memory Leak      |
 | Unawaited `message.delete()` in postDeploymentMessage   | HIGH     | Race Condition   |
-| Empty `.catch(() => {})` in setupCollector              | MEDIUM   | Error Handling   |
-| `pollUntilStateChange` returns before interval resolves | HIGH     | Logic Error      |
 | O(n) server lookup by name                              | MEDIUM   | Performance      |
 | Synchronous crypto blocking event loop                  | MEDIUM   | Event Loop       |
 | All API errors collapse to `null`                       | MEDIUM   | Type Safety      |
 | No graceful shutdown handler                            | MEDIUM   | Resource Cleanup |
 | No idle timeout on collector                            | MEDIUM   | Resource Cleanup |
 | Unvalidated component interaction parsing               | LOW      | Type Safety      |
-| Unsafe `PromiseFulfilledResult` cast                    | LOW      | Type Safety      |

@@ -7,13 +7,19 @@ import {
 } from 'discord.js';
 import Database, { PterodactylServer as DbPterodactylServer } from '../../helpers/database.js';
 import { buildError, Caller } from '@pookiesoft/bongbot-core';
-import { fetchServers, fetchAllServerResources, sendServerCommand } from './shared/pterodactyl_api.js';
+import {
+    fetchServers,
+    fetchServerResources,
+    fetchAllServerResources,
+    sendServerCommand,
+} from './shared/pterodactyl_api.js';
 import { buildServerStatusEmbed } from './shared/server_status_embed.js';
 import { buildServerControlComponents, disableAllComponents } from './shared/server_control_components.js';
 import type { InteractionEditReplyOptions } from 'discord.js';
 import type { Logger } from '@pookiesoft/bongbot-core';
 const ACTION_POLL_INTERVAL_MS = 500;
 const ACTION_TIMEOUT_MS = 60000;
+const COLLECTOR_TIMEOUT_MS = 10 * 60 * 1000;
 
 export default class ServerStatus {
     private db: Database;
@@ -74,11 +80,12 @@ export default class ServerStatus {
         if (!('manage' === interaction.options.getSubcommand())) {
             return;
         }
-        // TODO: [BUGS 4.2 / TECHNICAL_DEBT 3.1] Add idle timeout (e.g. idle: 300000) and extract 600000 to a named constant
-        const collector = message.createMessageComponentCollector({ time: 600000 });
+        const collector = message.createMessageComponentCollector({ time: COLLECTOR_TIMEOUT_MS });
 
         const controller = new AbortController();
         let busy = false;
+        let latestEmbed = message.embeds?.[0] ? EmbedBuilder.from(message.embeds[0]) : undefined;
+        let latestComponents: any[] = message.components;
         let pendingEdit: Promise<unknown> = Promise.resolve();
         const view: ManageView = {
             signal: controller.signal,
@@ -95,6 +102,10 @@ export default class ServerStatus {
                     pendingEdit = component.editReply(options);
                     await pendingEdit;
                 }
+                if (options.embeds?.[0]) latestEmbed = EmbedBuilder.from(options.embeds[0]);
+                if (options.components) {
+                    latestComponents = options.components.map(serializeComponentRow);
+                }
             },
         };
 
@@ -109,7 +120,9 @@ export default class ServerStatus {
 
             if (busy || controller.signal.aborted) {
                 await componentInteraction.reply({
-                    content: 'An action is already in progress or this view has expired.',
+                    content: controller.signal.aborted
+                        ? 'This view has expired. Run /pterodactyl manage again.'
+                        : 'An action is already in progress. Wait for it to finish.',
                     ephemeral: true,
                 });
                 return;
@@ -127,10 +140,8 @@ export default class ServerStatus {
                 await componentInteraction.followUp({ content: replyMessage, ephemeral: true });
 
                 await view.edit(componentInteraction, {
-                    ...(message.embeds?.[0]
-                        ? { embeds: [EmbedBuilder.from(message.embeds[0]).setDescription(replyMessage)] }
-                        : {}),
-                    components: disableAllComponents(message.components),
+                    ...(latestEmbed ? { embeds: [EmbedBuilder.from(latestEmbed).setDescription(replyMessage)] } : {}),
+                    components: disableAllComponents(latestComponents),
                 });
 
                 const dbServer = this.db.getServerById(parseInt(dbServerId));
@@ -158,7 +169,7 @@ export default class ServerStatus {
                         content: '❌ An error occurred processing your request.',
                         ephemeral: true,
                     })
-                    .catch(() => {}); // TODO: [BUGS 1.3] Log the error instead of silently swallowing
+                    .catch((error) => this._logger.error(error as Error, interaction));
 
                 if (dbServerId) {
                     await this.refreshStatus(componentInteraction, parseInt(dbServerId), view);
@@ -209,6 +220,7 @@ export default class ServerStatus {
         if (view.signal.aborted) return;
         const targets =
             identifier === 'all' ? servers : servers.filter((server) => server.attributes.identifier === identifier);
+        // TODO: Limit bulk command concurrency and back off on rate limits; see BUGS.md section 2.4.
         const results = await Promise.all(
             targets.map(async (server) => ({
                 server,
@@ -221,22 +233,48 @@ export default class ServerStatus {
                 ),
             }))
         );
-        const failedNames = results.filter((result) => !result.success).map((result) => result.server.attributes.name);
+        const failures = results.filter((result) => !result.success);
+        for (const { server } of failures) {
+            this._logger.debug(
+                `Failed to ${action} server: ${server.attributes.identifier} (${server.attributes.name})`
+            );
+        }
+        const failedNames = failures.map(({ server }) => server.attributes.name);
         const identifiers = results
             .filter((result) => result.success)
             .map((result) => result.server.attributes.identifier);
-        const failureMessage = failedNames.length
-            ? identifier === 'all'
-                ? `⚠️ Failed to stop ${failedNames.length} server(s): ${failedNames.join(', ')}`
-                : '❌ Failed to control server.'
-            : '';
+        const failureMessage = buildFailureMessage(action, identifier, failedNames);
         if (failureMessage) await componentInteraction.followUp({ content: failureMessage, ephemeral: true });
 
+        const targetIds = new Set(identifiers);
+        const baseline = await Promise.all(
+            servers.map((server) =>
+                targetIds.has(server.attributes.identifier)
+                    ? null
+                    : fetchServerResources(
+                          this.caller,
+                          server.attributes.identifier,
+                          dbServer.serverUrl,
+                          dbServer.apiKey
+                      )
+            )
+        );
         const deadline = Date.now() + ACTION_TIMEOUT_MS;
-        let restartTransitionObserved = false;
+        const restartTransitions = new Set<string>();
         let previousDisplay = '';
         while (!view.signal.aborted) {
-            const resources = await fetchAllServerResources(this.caller, servers, dbServer.serverUrl, dbServer.apiKey);
+            const resources = await Promise.all(
+                servers.map((server, index) =>
+                    targetIds.has(server.attributes.identifier)
+                        ? fetchServerResources(
+                              this.caller,
+                              server.attributes.identifier,
+                              dbServer.serverUrl,
+                              dbServer.apiKey
+                          )
+                        : baseline[index]
+                )
+            );
             if (view.signal.aborted) return;
             const states = new Map(
                 servers.map((server, index) => [
@@ -244,12 +282,13 @@ export default class ServerStatus {
                     resources[index]?.attributes.current_state,
                 ])
             );
-            const restartState = states.get(identifier);
-            if (restartState && restartState !== 'running' && restartState !== 'unknown')
-                restartTransitionObserved = true;
+            for (const id of identifiers) {
+                const state = states.get(id);
+                if (state && state !== 'running') restartTransitions.add(id);
+            }
             const complete =
                 identifiers.every((id) => states.get(id) === (action === 'stop' ? 'offline' : 'running')) &&
-                (action !== 'restart' || identifiers.length === 0 || restartTransitionObserved);
+                (action !== 'restart' || identifiers.every((id) => restartTransitions.has(id)));
             const timedOut = Date.now() >= deadline;
             const pending = !complete && !timedOut;
             let status = identifiers.length ? 'Action completed.' : 'No server actions completed.';
@@ -313,6 +352,21 @@ export default class ServerStatus {
 }
 
 type ValidatedDbServer = DbPterodactylServer & { id: number };
+
+function buildFailureMessage(action: string, identifier: string, names: string[]): string {
+    if (names.length === 0) return '';
+    if (identifier === 'all') return `⚠️ Failed to ${action} ${names.length} server(s): ${names.join(', ')}`;
+    return '❌ Failed to control server.';
+}
+
+function serializeComponentRow(row: any): any {
+    if (!('toJSON' in row)) return row;
+    try {
+        return row.toJSON();
+    } catch {
+        return row;
+    }
+}
 
 interface ManageView {
     signal: AbortSignal;

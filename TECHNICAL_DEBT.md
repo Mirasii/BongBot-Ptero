@@ -72,17 +72,9 @@ const COLLECTOR_TIMEOUT_MS = 10 * 60 * 1000;
 
 ---
 
-### 3.2 Polling Configuration
+### 3.2 Polling Configuration — resolved
 
-**Location**: `src/commands/pterodactyl/server_status.ts`
-**Values**: `maxAttempts = 120`, `interval = 500`
-
-These are inline default parameter values representing 60 seconds of total polling with no explanation. **Proposed fix** — extract to named constants:
-
-```typescript
-const POLL_MAX_ATTEMPTS = 120;
-const POLL_INTERVAL_MS = 500; // 120 × 500ms = 60 seconds total
-```
+`server_status.ts` uses `ACTION_POLL_INTERVAL_MS` and `ACTION_TIMEOUT_MS`. The polling loop checks elapsed time instead of an attempt count.
 
 ---
 
@@ -177,7 +169,7 @@ One minor point: the explicit type assertion `interaction as CommandInteraction`
 
 ## 5. Test Coverage Gaps
 
-Current coverage is excellent (100% statements, 100% functions, ~99% branches). The single uncovered branch is in `postDeploymentMessage` — the embed description-only match path (`index.ts:66`):
+The original audit recorded 100% statements, 100% functions, and approximately 99% branches. These figures are historical; use a fresh coverage run for the current branch. The single uncovered branch is in `postDeploymentMessage` — the embed description-only match path (`index.ts:66`):
 
 ```typescript
 embed.title?.includes(GITHUB_REPO_NAME) || embed.description?.includes(GITHUB_REPO_NAME); // ← this branch not covered
@@ -186,9 +178,9 @@ embed.title?.includes(GITHUB_REPO_NAME) || embed.description?.includes(GITHUB_RE
 **Other gaps worth adding**:
 
 - Collector timeout expiry (no test verifies components are removed after 10 minutes)
-- `pollUntilStateChange` at exactly `maxAttempts` boundary
+- Manage polling deadline, repeated resource failures, and collector expiry during reads/edits are covered in `server_status.test.ts`
 - Malformed ciphertext passed to `decryptApiKey` (should throw a clear error)
-- Network failure mid-polling sequence
+- Transient Discord edit failures and persistent resource-read failures are covered in `server_status.test.ts`
 
 ---
 
@@ -213,7 +205,7 @@ embed.title?.includes(GITHUB_REPO_NAME) || embed.description?.includes(GITHUB_RE
 
 ---
 
-## 7. Quality Metrics Summary
+## 7. Original Audit Metrics (historical)
 
 | Metric                            | Value | Status |
 | --------------------------------- | ----- | ------ |

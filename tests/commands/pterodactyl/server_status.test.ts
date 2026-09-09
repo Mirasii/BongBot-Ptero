@@ -536,6 +536,51 @@ describe('server_status command', () => {
             ).toBe(true);
         });
 
+        it('polls only the action target and preserves unrelated server snapshots', async () => {
+            const reads = new Map<string, number>();
+            jest.spyOn(caller, 'get').mockImplementation(async (_url, path) => {
+                if (path === '/api/client')
+                    return {
+                        data: ['server-123', 'other'].map((identifier) => ({
+                            attributes: { identifier, name: identifier },
+                        })),
+                    };
+                const id = path.split('/')[4];
+                const count = reads.get(id) ?? 0;
+                reads.set(id, count + 1);
+                return {
+                    attributes: {
+                        current_state: id === 'other' ? 'offline' : count < 2 ? 'starting' : 'running',
+                        resources: { memory_bytes: 0, cpu_absolute: 0, disk_bytes: 0, uptime: 0 },
+                    },
+                };
+            });
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('start');
+            await finishAction(collectorCallbacks.collect(component));
+            expect(reads.get('server-123')).toBe(3);
+            expect(reads.get('other')).toBe(1);
+            expect(component.editReply.mock.calls.at(-1)?.[0].embeds[0].data.fields[1].value).toContain('offline');
+        });
+
+        it('keeps the previous action result visible while the next action starts', async () => {
+            observeStates(['offline']);
+            await setupCollector(mockInteraction, mockMessage);
+            await finishAction(collectorCallbacks.collect(actionInteraction('stop')));
+            const next = actionInteraction('start');
+            const pending = collectorCallbacks.collect(next);
+            await jest.advanceTimersByTimeAsync(0);
+            const initial = next.editReply.mock.calls[0][0];
+            expect(initial.embeds[0].data.fields[0].value).toContain('offline');
+            expect(
+                initial.components
+                    .flatMap((row: any) => row.components)
+                    .every((component: any) => component.data.disabled)
+            ).toBe(true);
+            await collectorCallbacks.end();
+            await pending;
+        });
+
         it('reports an unconfirmed restart and avoids duplicate pending edits', async () => {
             observeStates(['running']);
             await setupCollector(mockInteraction, mockMessage);
@@ -692,6 +737,7 @@ describe('server_status command', () => {
                 expect.stringContaining('stopping'),
             ]);
             expect(updates[1].embeds[0].data.description).toContain('Failed to stop 1 server(s): Failed');
+            expect(mockLogger.debug).toHaveBeenCalledWith('Failed to stop server: server-2 (Failed)');
             expect(updates[1].embeds[0].data.description).toContain('Action completed.');
             expect(jest.getTimerCount()).toBe(0);
         });
