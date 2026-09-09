@@ -217,11 +217,10 @@ export default class ServerStatus {
         context: { action: ActionType; identifier: string; failureMessage: string }
     ): Promise<void> {
         const deadline = Date.now() + ACTION_TIMEOUT_MS;
-        const watching = this.stateManager.isWatching();
         let lastRender = '';
 
         while (!this.cancelled) {
-            const servers = this.stateManager.managedServers();
+            const servers = this.stateManager.targets(context.identifier);
             const resources = await fetchAllServerResources(this.caller, servers, dbServer.serverUrl, dbServer.apiKey);
             this.stateManager.observeAll(resources);
 
