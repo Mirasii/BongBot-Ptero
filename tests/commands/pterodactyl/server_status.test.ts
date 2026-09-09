@@ -549,6 +549,48 @@ describe('server_status command', () => {
             expect(jest.getTimerCount()).toBe(0);
         });
 
+        it('continues polling after a transient Discord edit failure', async () => {
+            observeStates(['starting', 'running']);
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('start');
+            const unavailable = Object.assign(new Error('Discord unavailable'), { status: 503 });
+            component.editReply.mockResolvedValueOnce(undefined).mockRejectedValueOnce(unavailable);
+            await finishAction(collectorCallbacks.collect(component));
+            expect(component.editReply.mock.calls[1]).toEqual(component.editReply.mock.calls[2]);
+            expect(component.editReply.mock.calls.at(-1)?.[0].embeds[0].data.description).toBe('Action completed.');
+            expect(mockLogger.error).toHaveBeenCalledWith(unavailable, mockInteraction);
+            expect(jest.getTimerCount()).toBe(0);
+        });
+
+        it('bounds persistent edit failures and releases the action lock', async () => {
+            observeStates(['running']);
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('start');
+            component.editReply.mockRejectedValue(Object.assign(new Error('Discord unavailable'), { status: 503 }));
+            await finishAction(collectorCallbacks.collect(component));
+            expect(component.editReply).toHaveBeenCalledTimes(4);
+            expect(jest.getTimerCount()).toBe(0);
+            const next = actionInteraction('start');
+            await finishAction(collectorCallbacks.collect(next));
+            expect(next.deferUpdate).toHaveBeenCalledTimes(1);
+            expect(next.editReply.mock.calls.at(-1)?.[0].embeds[0].data.description).toBe('Action completed.');
+        });
+
+        it('times out repeated resource failures without reporting completion', async () => {
+            const originalGet = caller.get.bind(caller);
+            jest.spyOn(caller, 'get').mockImplementation(async (...args) => {
+                if (args[1].endsWith('/resources')) throw new Error('Panel unavailable');
+                return originalGet(...args);
+            });
+            await setupCollector(mockInteraction, mockMessage);
+            const component = actionInteraction('start');
+            await finishAction(collectorCallbacks.collect(component));
+            const finalEmbed = component.editReply.mock.calls.at(-1)?.[0].embeds[0].data;
+            expect(finalEmbed.description).toContain('Completion could not be confirmed');
+            expect(finalEmbed.fields[0].value).toContain('unknown');
+            expect(jest.getTimerCount()).toBe(0);
+        });
+
         it('rejects a second action and cancels pending polling when the collector ends', async () => {
             observeStates(['starting']);
             await setupCollector(mockInteraction, mockMessage);

@@ -85,7 +85,16 @@ export default class ServerStatus {
             edit: async (component, options) => {
                 if (controller.signal.aborted) return;
                 pendingEdit = component.editReply(options);
-                await pendingEdit;
+                try {
+                    await pendingEdit;
+                } catch (error) {
+                    const status = error && typeof error === 'object' && 'status' in error ? Number(error.status) : 0;
+                    if (!(status >= 500 && status <= 599)) throw error;
+                    this._logger.error(error as Error, interaction);
+                    if (controller.signal.aborted) return;
+                    pendingEdit = component.editReply(options);
+                    await pendingEdit;
+                }
             },
         };
 
