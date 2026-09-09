@@ -9,6 +9,7 @@ export interface PterodactylServer {
     serverUrl: string;
     apiKey: string;
 }
+export type StoredPterodactylServer = PterodactylServer & { id: number };
 
 export default class Database {
     private db: BetterSqlite3.Database;
@@ -104,9 +105,9 @@ export default class Database {
         stmt.run(...values);
     }
 
-    getServerById(id: number): PterodactylServer | undefined {
+    getServerById(id: number): StoredPterodactylServer | undefined {
         const stmt = this.db.prepare('SELECT * FROM pterodactyl_servers WHERE id = ?');
-        let server = stmt.get(id) as PterodactylServer | undefined;
+        let server = stmt.get(id) as StoredPterodactylServer | undefined;
         if (!server) {
             return server;
         }
@@ -115,9 +116,9 @@ export default class Database {
     }
 
     // TODO: [BUGS 2.2] Decrypts all API keys eagerly on every query — consider deferring decryption until the key is needed
-    getServersByUserId(userId: string): PterodactylServer[] {
+    getServersByUserId(userId: string): StoredPterodactylServer[] {
         const stmt = this.db.prepare('SELECT * FROM pterodactyl_servers WHERE userId = ?');
-        let servers = stmt.all(userId) as PterodactylServer[];
+        let servers = stmt.all(userId) as StoredPterodactylServer[];
         servers = servers.map((server) => {
             server.apiKey = this.decryptApiKey(server.apiKey);
             return server;

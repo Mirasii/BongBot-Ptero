@@ -5,7 +5,20 @@ import ServerStatus from './server_status.js';
 import UpdateServer from './update_server.js';
 import RemoveServer from './remove_server.js';
 import DatabasePool from '../../services/database_pool.js';
+import { StateManager } from './shared/state_manager.js';
 import { Caller, LOGGER } from '@pookiesoft/bongbot-core';
+
+const stateManagers = new WeakMap<ChatInputCommandInteraction, StateManager>();
+
+function stateManagerFor(interaction: ChatInputCommandInteraction): StateManager {
+    const existing = stateManagers.get(interaction);
+    if (existing) {
+        return existing;
+    }
+    const manager = new StateManager();
+    stateManagers.set(interaction, manager);
+    return manager;
+}
 
 export default {
     msgFlag: MessageFlags.Ephemeral,
@@ -73,7 +86,9 @@ export default {
             case 'list':
                 return await new ListServers(db).execute(interaction);
             case 'manage':
-                return await new ServerStatus(db, caller, LOGGER.default).execute(interaction);
+                return await new ServerStatus(db, caller, LOGGER.default, stateManagerFor(interaction)).execute(
+                    interaction
+                );
             case 'update':
                 return await new UpdateServer(db, caller).execute(interaction);
             case 'remove':
@@ -90,7 +105,8 @@ export default {
         return new ServerStatus(
             DatabasePool.getInstance().getConnection(),
             new Caller(),
-            LOGGER.default
+            LOGGER.default,
+            stateManagerFor(interaction)
         ).setupCollector(interaction, message);
     },
 

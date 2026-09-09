@@ -1,5 +1,6 @@
 import { EmbedBuilder } from 'discord.js';
 import { PterodactylServer, ServerResources } from './pterodactyl_api.js';
+import { STATES } from './state_manager.js';
 
 export function buildServerStatusEmbed(
     servers: PterodactylServer[],
@@ -49,13 +50,13 @@ function formatServerField(resource: ServerResources | null): string {
 // TODO: [TECHNICAL_DEBT 3.7] Extract state strings to a shared SERVER_STATES constant with a ServerState type
 function getStatusEmoji(state: string): string {
     switch (state) {
-        case 'running':
+        case STATES.running:
             return '🟢';
-        case 'starting':
+        case STATES.starting:
             return '🟡';
-        case 'stopping':
+        case STATES.stopping:
             return '🟠';
-        case 'offline':
+        case STATES.offline:
             return '🔴';
         default:
             return '⚪';
