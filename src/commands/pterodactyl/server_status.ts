@@ -204,6 +204,10 @@ export default class ServerStatus {
             await this.pollUntilComplete(componentInteraction, dbServer, { action, identifier, failureMessage });
         } finally {
             this.stateManager.clearActions(this.stateManager.targets(identifier));
+            /** set new initial state for servers. */
+            const servers = this.stateManager.targets(identifier);
+            const resources = this.stateManager.currentResources(servers);
+            servers.forEach((server, index) => this.stateManager.attachState(server, resources[index]));
         }
     }
 

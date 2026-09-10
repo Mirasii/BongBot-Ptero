@@ -17,6 +17,8 @@ export class StateManager {
     private states = new Map<string, State>();
 
     attachState(server: PterodactylServer, resources: ServerResources | null): void {
+        /** if null resources comes from a baseline, keep existing state */
+        if (resources == null && this.states.has(server.attributes.identifier)) return;
         this.states.set(server.attributes.identifier, new State(server, resources));
     }
 
@@ -40,8 +42,14 @@ export class StateManager {
         return states;
     }
 
-    currentResources(): (ServerResources | null)[] {
+    currentResources(servers?: PterodactylServer[]): (ServerResources | null)[] {
         const states: (ServerResources | null)[] = [];
+        if (servers) {
+            servers.forEach((server) =>
+                states.push(this.states.get(server.attributes.identifier)?.getResources() ?? null)
+            );
+            return states;
+        }
         this.states.forEach((state) => states.push(state.getResources()));
         return states;
     }
