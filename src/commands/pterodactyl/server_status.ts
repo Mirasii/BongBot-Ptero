@@ -1,24 +1,35 @@
 import { ChatInputCommandInteraction, ButtonInteraction, Message, StringSelectMenuInteraction } from 'discord.js';
-import Database, { PterodactylServer as DbPterodactylServer } from '../../helpers/database.js';
+import Database, { StoredPterodactylServer } from '../../helpers/database.js';
 import { buildError, Caller } from '@pookiesoft/bongbot-core';
 import {
     fetchServers,
-    fetchServerResources,
     fetchAllServerResources,
     sendServerCommand,
+    PterodactylServer,
+    ServerResources,
 } from './shared/pterodactyl_api.js';
 import { buildServerStatusEmbed } from './shared/server_status_embed.js';
 import { buildServerControlComponents, disableAllComponents } from './shared/server_control_components.js';
+import { StateManager, ActionType } from './shared/state_manager.js';
 import type { Logger } from '@pookiesoft/bongbot-core';
+
+const ACTION_POLL_INTERVAL_MS = 500;
+const ACTION_TIMEOUT_MS = 60000;
+const ACTION_TIMEOUT_MESSAGE = `⚠️ Stopped watching after ${ACTION_TIMEOUT_MS / 1000} seconds. Run \`/pterodactyl manage\` to check again.`;
+
 export default class ServerStatus {
     private db: Database;
     private caller: Caller;
     private _logger: Logger;
+    private stateManager: StateManager;
 
-    constructor(db: Database, caller: Caller, _logger: Logger) {
+    private cancelled: boolean = false;
+
+    constructor(db: Database, caller: Caller, _logger: Logger, stateManager: StateManager) {
         this.db = db;
         this.caller = caller;
         this._logger = _logger;
+        this.stateManager = stateManager;
     }
 
     async execute(interaction: ChatInputCommandInteraction) {
@@ -45,16 +56,13 @@ export default class ServerStatus {
                 throw new Error(`No server found with name "${serverName}". Your registered servers:\n\n${serverList}`);
             }
 
-            const servers = await fetchServers(this.caller, selectedServer.serverUrl, selectedServer.apiKey);
-            const resources = await fetchAllServerResources(
-                this.caller,
-                servers,
+            const { servers, resources } = await this.collectServerInfo(
                 selectedServer.serverUrl,
                 selectedServer.apiKey
             );
 
             const embed = buildServerStatusEmbed(servers, resources);
-            const components = buildServerControlComponents(servers, resources, selectedServer.id!);
+            const components = buildServerControlComponents(servers, resources, selectedServer.id);
 
             return {
                 embeds: [embed],
@@ -84,9 +92,8 @@ export default class ServerStatus {
             await componentInteraction.deferUpdate();
 
             const { dbServerId, identifier, action } = this.parseComponentInteraction(componentInteraction);
-            const replyMessage = this.getActionMessage(action, identifier);
 
-            await componentInteraction.followUp({ content: replyMessage, ephemeral: true });
+            await ephemeralFollowup(componentInteraction, this.getActionMessage(action, identifier));
 
             try {
                 await componentInteraction.editReply({
@@ -95,23 +102,17 @@ export default class ServerStatus {
 
                 const dbServer = this.db.getServerById(parseInt(dbServerId));
 
-                if (!dbServer || !dbServer.id) {
-                    await componentInteraction.followUp({
-                        content: '❌ Server configuration not found.',
-                        ephemeral: true,
-                    });
+                if (!dbServer) {
+                    await ephemeralFollowup(componentInteraction, '❌ Server configuration not found.');
                     return;
                 }
 
-                await this.handleServerAction(componentInteraction, dbServer as ValidatedDbServer, identifier, action);
+                await this.handleServerAction(componentInteraction, dbServer, identifier, action);
             } catch (error) {
                 this._logger.error(error as Error, interaction);
-                await componentInteraction
-                    .followUp({
-                        content: '❌ An error occurred processing your request.',
-                        ephemeral: true,
-                    })
-                    .catch(() => {}); // TODO: [BUGS 1.3] Log the error instead of silently swallowing
+                await ephemeralFollowup(componentInteraction, '❌ An error occurred processing your request.').catch(
+                    () => {}
+                ); // TODO: [BUGS 1.3] Log the error instead of silently swallowing
 
                 if (dbServerId) {
                     await this.refreshStatus(componentInteraction, parseInt(dbServerId));
@@ -120,163 +121,166 @@ export default class ServerStatus {
         });
 
         collector.on('end', () => {
+            this.stateManager.flushState();
             message.edit({ components: [] }).catch((error) => {
                 this._logger.error(error, interaction);
             });
+            this.cancelled = true;
         });
     }
 
+    // Ids are built by buildServerControlComponents, and Discord only sends back one it put on the
+    // message, so the action is always one of the three.
     // TODO: [BUGS 3.2 / ARCHITECTURE 4.3] Validate split length before destructuring; consider a ComponentIdParser utility
     private parseComponentInteraction(componentInteraction: ButtonInteraction | StringSelectMenuInteraction): {
         dbServerId: string;
         identifier: string;
-        action: string;
+        action: ActionType;
     } {
         if (componentInteraction.isStringSelectMenu()) {
             const [dbServerId, identifier, action] = componentInteraction.values[0].split(':');
-            return { dbServerId, identifier, action };
+            return { dbServerId, identifier, action: action as ActionType };
         }
         const [, dbServerId, identifier, action] = componentInteraction.customId.split(':');
-        return { dbServerId, identifier, action };
+        return { dbServerId, identifier, action: action as ActionType };
     }
 
-    private getActionMessage(action: string, identifier: string): string {
-        const actionText = action === 'start' ? '▶️ Starting' : '🔄 Restarting';
-        const stopMessage =
-            identifier === 'all'
+    private getActionMessage(action: ActionType, identifier: string): string {
+        if (action === 'stop') {
+            return identifier === 'all'
                 ? '⏹️ Stopping all servers... Status will update automatically.'
                 : '⏹️ Stopping server... Status will update automatically.';
-
-        return (
-            {
-                stop: stopMessage,
-                start: `${actionText} server... Status will update automatically.`,
-                restart: `${actionText} server... Status will update automatically.`,
-            }[action] || 'Processing your request...'
-        );
+        }
+        const actionText = action === 'start' ? '▶️ Starting' : '🔄 Restarting';
+        return `${actionText} server... Status will update automatically.`;
     }
 
     private async handleServerAction(
         componentInteraction: ButtonInteraction | StringSelectMenuInteraction,
-        dbServer: ValidatedDbServer,
+        dbServer: StoredPterodactylServer,
         identifier: string,
-        action: string
+        action: ActionType
     ): Promise<void> {
-        if (identifier === 'all' && action === 'stop') {
-            const servers = await fetchServers(this.caller, dbServer.serverUrl, dbServer.apiKey);
-            // TODO: [BUGS 2.4] Add concurrency limiting (e.g. p-limit) and backoff on 429 responses
-            const stopPromises = servers.map((server) =>
-                sendServerCommand(
+        await this.baselineServers(dbServer, identifier);
+        // TODO: [BUGS 2.4] Add concurrency limiting (e.g. p-limit) and backoff on 429 responses
+        const results = await Promise.all(
+            this.stateManager.targets(identifier).map(async (server) => ({
+                server,
+                success: await sendServerCommand(
                     this.caller,
                     server.attributes.identifier,
-                    'stop',
+                    action,
                     dbServer.serverUrl,
                     dbServer.apiKey
-                ).then((success) => ({
-                    identifier: server.attributes.identifier,
-                    name: server.attributes.name,
-                    success,
-                }))
+                ),
+            }))
+        );
+
+        // Tracked after the send, so the baseline is the reading from before the command. A server
+        // whose command failed keeps its place on the panel, untracked.
+        const failed: string[] = [];
+        for (const { server, success } of results) {
+            if (success) {
+                this.stateManager.trackState(server.attributes.identifier, action);
+                continue;
+            }
+            failed.push(server.attributes.name);
+            this._logger.debug(
+                `Failed to ${action} server: ${server.attributes.identifier} (${server.attributes.name})`
             );
-            const results = await Promise.allSettled(stopPromises);
-
-            const failedServers: string[] = [];
-            const successfulIdentifiers: string[] = [];
-
-            for (const result of results) {
-                // TODO: [BUGS 3.3] Use a type guard (result.status === 'fulfilled') instead of unsafe cast
-                const value = (result as PromiseFulfilledResult<{ identifier: string; name: string; success: boolean }>)
-                    .value;
-                if (!value.success) {
-                    failedServers.push(value.name);
-                    this._logger.debug(`Failed to stop server: ${value.identifier} (${value.name})`);
-                } else {
-                    successfulIdentifiers.push(value.identifier);
-                }
-            }
-
-            if (failedServers.length > 0) {
-                await componentInteraction.followUp({
-                    content: `⚠️ Failed to stop ${failedServers.length} server(s): ${failedServers.join(', ')}`,
-                    ephemeral: true,
-                });
-            }
-
-            if (successfulIdentifiers.length > 0) {
-                await this.pollUntilStateChange(componentInteraction, successfulIdentifiers, 'offline', dbServer);
-            } else {
-                await this.refreshStatus(componentInteraction, dbServer.id);
-            }
-        } else {
-            const success = await sendServerCommand(
-                this.caller,
-                identifier,
-                action as 'start' | 'stop' | 'restart',
-                dbServer.serverUrl,
-                dbServer.apiKey
-            );
-
-            if (!success) {
-                await componentInteraction.followUp({
-                    content: '❌ Failed to control server.',
-                    ephemeral: true,
-                });
-                await this.refreshStatus(componentInteraction, dbServer.id);
-                return;
-            }
-
-            const expectedState = action === 'start' ? 'running' : action === 'stop' ? 'offline' : 'running';
-
-            await this.pollUntilStateChange(componentInteraction, [identifier], expectedState, dbServer);
         }
-    }
 
-    // TODO: [BUGS 1.1 / 1.4 / ARCHITECTURE 4.2] Refactor polling — return a Promise that resolves when done,
-    //   track the interval ID for cleanup on error/collector end, and guard against overlapping checkStatus calls.
-    //   Extract maxAttempts/interval to named constants (TECHNICAL_DEBT 3.2).
-    //   Consider extracting to a standalone PollService class (ARCHITECTURE 4.2).
-    private async pollUntilStateChange(
-        componentInteraction: ButtonInteraction | StringSelectMenuInteraction,
-        identifiers: string[],
-        expectedState: string,
-        dbServer: ValidatedDbServer,
-        maxAttempts: number = 120,
-        interval: number = 500
-    ): Promise<void> {
-        let attempts = 0;
+        const failureMessage = buildFailureMessage(action, identifier, failed);
+        if (failureMessage) {
+            await ephemeralFollowup(componentInteraction, failureMessage);
+        }
 
-        const checkStatus = async (): Promise<boolean> => {
-            attempts++;
-
-            const resources = await Promise.all(
-                identifiers.map((id) => fetchServerResources(this.caller, id, dbServer.serverUrl, dbServer.apiKey))
-            );
-
-            const allReached = resources.every((r) => {
-                if (!r) return false;
-                const state = r.attributes.current_state;
-                return state === expectedState;
-            });
-
-            if (allReached || attempts >= maxAttempts) {
-                await this.refreshStatus(componentInteraction, dbServer.id);
-                return true;
-            }
-
-            return false;
-        };
-
-        const done = await checkStatus();
-        if (done) {
+        if (!results.some((result) => result.success)) {
+            await this.refreshStatus(componentInteraction, dbServer.id);
             return;
         }
 
-        const pollInterval = setInterval(async () => {
-            const done = await checkStatus();
-            if (done) {
-                clearInterval(pollInterval);
+        try {
+            await this.pollUntilComplete(componentInteraction, dbServer, { action, identifier, failureMessage });
+        } finally {
+            this.stateManager.clearActions(this.stateManager.targets(identifier));
+            /** set new initial state for servers. */
+            const servers = this.stateManager.targets(identifier);
+            const resources = this.stateManager.currentResources(servers);
+            servers.forEach((server, index) => this.stateManager.attachState(server, resources[index]));
+        }
+    }
+
+    /** Renders every change it sees, until each commanded server completes or the deadline passes. */
+    private async pollUntilComplete(
+        componentInteraction: ButtonInteraction | StringSelectMenuInteraction,
+        dbServer: StoredPterodactylServer,
+        context: { action: ActionType; identifier: string; failureMessage: string }
+    ): Promise<void> {
+        const deadline = Date.now() + ACTION_TIMEOUT_MS;
+        const servers = this.stateManager.targets(context.identifier);
+        let lastStates: string[] = [];
+        let lastDescription = '';
+
+        while (!this.cancelled) {
+            const resources = await fetchAllServerResources(this.caller, servers, dbServer.serverUrl, dbServer.apiKey);
+            this.stateManager.observeAll(servers, resources);
+
+            const complete = this.stateManager.allComplete();
+            const pending = !complete && Date.now() < deadline;
+
+            let status: string;
+            if (pending) {
+                status = this.getActionMessage(context.action, context.identifier);
+            } else if (complete) {
+                status = '✅ Action complete.';
+            } else {
+                status = ACTION_TIMEOUT_MESSAGE;
             }
-        }, interval);
+
+            const description = [context.failureMessage, status].filter(Boolean).join('\n');
+            const states = this.stateManager.currentStates(servers);
+            const hasChanged =
+                description !== lastDescription || states.some((state, index) => state !== lastStates[index]);
+            if (hasChanged) {
+                const managed = this.stateManager.managedServers();
+                const currentResources = this.stateManager.currentResources();
+                await componentInteraction.editReply({
+                    embeds: [buildServerStatusEmbed(managed, currentResources, description)],
+                    components: buildServerControlComponents(managed, currentResources, dbServer.id, pending),
+                });
+                lastStates = states;
+                lastDescription = description;
+            }
+
+            if (!pending) return;
+            await delay(ACTION_POLL_INTERVAL_MS);
+        }
+    }
+
+    private async baselineServers(dbServer: StoredPterodactylServer, identifier: string): Promise<void> {
+        if (this.stateManager.managedServers().length === 0) {
+            await this.collectServerInfo(dbServer.serverUrl, dbServer.apiKey);
+            return;
+        }
+        const servers = this.stateManager.targets(identifier);
+        await this.fetchResources(servers, dbServer.serverUrl, dbServer.apiKey);
+    }
+
+    private async collectServerInfo(url: string, apiKey: string): Promise<ServerSnapshot> {
+        const servers = await fetchServers(this.caller, url, apiKey);
+        const resources = await this.fetchResources(servers, url, apiKey);
+        return { servers, resources };
+    }
+
+    private async fetchResources(
+        servers: PterodactylServer[],
+        url: string,
+        apiKey: string
+    ): Promise<(ServerResources | null)[]> {
+        const resources = await fetchAllServerResources(this.caller, servers, url, apiKey);
+        servers.forEach((server, index) => this.stateManager.attachState(server, resources[index]));
+        return resources;
     }
 
     private async refreshStatus(
@@ -289,16 +293,14 @@ export default class ServerStatus {
             if (!dbServer) {
                 return;
             }
-
-            const servers = await fetchServers(this.caller, dbServer.serverUrl, dbServer.apiKey);
-            const resources = await fetchAllServerResources(this.caller, servers, dbServer.serverUrl, dbServer.apiKey);
+            const { servers, resources } = await this.collectServerInfo(dbServer.serverUrl, dbServer.apiKey);
 
             const embed = buildServerStatusEmbed(
                 servers,
                 resources,
                 '*Last updated: ' + new Date().toLocaleTimeString() + '*'
             );
-            const components = buildServerControlComponents(servers, resources, dbServer.id!);
+            const components = buildServerControlComponents(servers, resources, dbServer.id);
 
             await componentInteraction.editReply({
                 embeds: [embed],
@@ -310,4 +312,27 @@ export default class ServerStatus {
     }
 }
 
-type ValidatedDbServer = DbPterodactylServer & { id: number };
+function buildFailureMessage(action: ActionType, identifier: string, names: string[]): string {
+    if (names.length === 0) return '';
+    if (identifier === 'all') return `⚠️ Failed to ${action} ${names.length} server(s): ${names.join(', ')}`;
+    return '❌ Failed to control server.';
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function ephemeralFollowup(
+    componentInteraction: ButtonInteraction | StringSelectMenuInteraction,
+    content: string
+): Promise<void> {
+    await componentInteraction.followUp({
+        content: content,
+        ephemeral: true,
+    });
+}
+
+interface ServerSnapshot {
+    servers: PterodactylServer[];
+    resources: (ServerResources | null)[];
+}

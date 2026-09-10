@@ -11,7 +11,8 @@ import { PterodactylServer, ServerResources } from './pterodactyl_api.js';
 export function buildServerControlComponents(
     servers: PterodactylServer[],
     resources: (ServerResources | null)[],
-    dbServerId: number
+    dbServerId: number,
+    disabled: boolean = false
 ): (ActionRowBuilder<StringSelectMenuBuilder> | ActionRowBuilder<ButtonBuilder>)[] {
     const rows: (ActionRowBuilder<StringSelectMenuBuilder> | ActionRowBuilder<ButtonBuilder>)[] = [];
     const allOptions: { label: string; description: string; value: string }[] = [];
@@ -57,7 +58,8 @@ export function buildServerControlComponents(
         const selectMenu = new StringSelectMenuBuilder()
             .setCustomId(`server_control:${dbServerId}:menu${i}`)
             .setPlaceholder('Server Actions')
-            .addOptions(menuOptions);
+            .addOptions(menuOptions)
+            .setDisabled(disabled);
 
         const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
         rows.push(row);
@@ -70,6 +72,7 @@ export function buildServerControlComponents(
                 .setCustomId(`server_control:${dbServerId}:all:stop`)
                 .setLabel('🔲 Stop All Servers')
                 .setStyle(ButtonStyle.Danger)
+                .setDisabled(disabled)
         );
         rows.push(stopRow);
     }

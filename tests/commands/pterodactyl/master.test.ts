@@ -33,6 +33,7 @@ const mockServerStatusExecute = jest.fn<() => Promise<any>>();
 const mockUpdateExecute = jest.fn<() => Promise<any>>();
 const mockRemoveExecute = jest.fn<() => Promise<any>>();
 const mockSetupCollector = jest.fn<() => Promise<any>>();
+const constructedWith: unknown[] = [];
 
 jest.unstable_mockModule('../../../src/commands/pterodactyl/register_server.js', () => ({
     default: class MockRegisterServer {
@@ -48,6 +49,9 @@ jest.unstable_mockModule('../../../src/commands/pterodactyl/list_servers.js', ()
 
 jest.unstable_mockModule('../../../src/commands/pterodactyl/server_status.js', () => ({
     default: class MockServerStatus {
+        constructor(_db: unknown, _caller: unknown, _logger: unknown, stateManager: unknown) {
+            constructedWith.push(stateManager);
+        }
         execute = mockServerStatusExecute;
         setupCollector = mockSetupCollector;
     },
@@ -111,6 +115,28 @@ describe('pterodactyl master command', () => {
         pterodactylCommand.setupCollector(mockInteraction, mockMessage);
 
         expect(mockSetupCollector).toHaveBeenCalledWith(mockInteraction, mockMessage);
+    });
+
+    it('gives a panel one state manager across execute and setupCollector', async () => {
+        constructedWith.length = 0;
+        const panel = {
+            options: { getSubcommand: jest.fn(() => 'manage') },
+        } as unknown as ChatInputCommandInteraction;
+        const mockMessage = {
+            createMessageComponentCollector: jest.fn().mockReturnValue({ on: jest.fn() }),
+        } as unknown as Message;
+
+        await pterodactylCommand.execute(panel);
+        pterodactylCommand.setupCollector(panel, mockMessage);
+
+        expect(constructedWith[0]).toBe(constructedWith[1]);
+
+        const otherPanel = {
+            options: { getSubcommand: jest.fn(() => 'manage') },
+        } as unknown as ChatInputCommandInteraction;
+        await pterodactylCommand.execute(otherPanel);
+
+        expect(constructedWith[2]).not.toBe(constructedWith[0]);
     });
 
     it('should have fullDesc property', () => {
