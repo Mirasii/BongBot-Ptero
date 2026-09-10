@@ -55,7 +55,10 @@ export default class ServerStatus {
                 throw new Error(`No server found with name "${serverName}". Your registered servers:\n\n${serverList}`);
             }
 
-            const { servers, resources } = await this.mapServers(selectedServer.serverUrl, selectedServer.apiKey);
+            const { servers, resources } = await this.collectServerInfo(
+                selectedServer.serverUrl,
+                selectedServer.apiKey
+            );
 
             const embed = buildServerStatusEmbed(servers, resources);
             const components = buildServerControlComponents(servers, resources, selectedServer.id);
@@ -210,10 +213,11 @@ export default class ServerStatus {
         context: { action: ActionType; identifier: string; failureMessage: string }
     ): Promise<void> {
         const deadline = Date.now() + ACTION_TIMEOUT_MS;
-        let lastRender = '';
+        const servers = this.stateManager.targets(context.identifier);
+        let lastStates: string[] = [];
+        let lastDescription = '';
 
         while (!this.cancelled) {
-            const servers = this.stateManager.targets(context.identifier);
             const resources = await fetchAllServerResources(this.caller, servers, dbServer.serverUrl, dbServer.apiKey);
             this.stateManager.observeAll(servers, resources);
 
@@ -229,16 +233,19 @@ export default class ServerStatus {
                 status = ACTION_TIMEOUT_MESSAGE;
             }
 
-            const managed = this.stateManager.managedServers();
-            const currentResources = this.stateManager.currentResources();
             const description = [context.failureMessage, status].filter(Boolean).join('\n');
-            const render = [description, ...currentResources.map((r) => r?.attributes.current_state)].join('|');
-            if (render !== lastRender) {
+            const states = this.stateManager.currentStates(servers);
+            const hasChanged =
+                description !== lastDescription || states.some((state, index) => state !== lastStates[index]);
+            if (hasChanged) {
+                const managed = this.stateManager.managedServers();
+                const currentResources = this.stateManager.currentResources();
                 await componentInteraction.editReply({
                     embeds: [buildServerStatusEmbed(managed, currentResources, description)],
                     components: buildServerControlComponents(managed, currentResources, dbServer.id, pending),
                 });
-                lastRender = render;
+                lastStates = states;
+                lastDescription = description;
             }
 
             if (!pending) return;
@@ -248,22 +255,22 @@ export default class ServerStatus {
 
     private async baselineServers(dbServer: StoredPterodactylServer, identifier: string) {
         if (this.stateManager.managedServers().length === 0) {
-            await this.mapServers(dbServer.serverUrl, dbServer.apiKey);
+            await this.collectServerInfo(dbServer.serverUrl, dbServer.apiKey);
             return;
         }
         const servers = this.stateManager.targets(identifier);
-        await this.mapResources(servers, dbServer.serverUrl, dbServer.apiKey);
+        await this.fetchResources(servers, dbServer.serverUrl, dbServer.apiKey);
     }
 
-    private async mapServers(url: string, apiKey: string) {
+    private async collectServerInfo(url: string, apiKey: string) {
         const servers = await fetchServers(this.caller, url, apiKey);
-        const resources = await this.mapResources(servers, url, apiKey);
+        const resources = await this.fetchResources(servers, url, apiKey);
         return { servers, resources };
     }
 
-    private async mapResources(servers: PterodactylServer[], url: string, apiKey: string) {
+    private async fetchResources(servers: PterodactylServer[], url: string, apiKey: string) {
         const resources = await fetchAllServerResources(this.caller, servers, url, apiKey);
-        servers.forEach((server, index) => this.stateManager.newState(server, resources[index]));
+        servers.forEach((server, index) => this.stateManager.attachState(server, resources[index]));
         return resources;
     }
 
@@ -277,7 +284,7 @@ export default class ServerStatus {
             if (!dbServer) {
                 return;
             }
-            const { servers, resources } = await this.mapServers(dbServer.serverUrl, dbServer.apiKey);
+            const { servers, resources } = await this.collectServerInfo(dbServer.serverUrl, dbServer.apiKey);
 
             const embed = buildServerStatusEmbed(
                 servers,

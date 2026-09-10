@@ -16,7 +16,7 @@ export type ActionType = 'start' | 'stop' | 'restart';
 export class StateManager {
     private states = new Map<string, State>();
 
-    newState(server: PterodactylServer, resources: ServerResources | null): void {
+    attachState(server: PterodactylServer, resources: ServerResources | null): void {
         this.states.set(server.attributes.identifier, new State(server, resources));
     }
 
@@ -32,6 +32,12 @@ export class StateManager {
         }
         const state = this.states.get(identifier);
         return state ? [state.server] : [];
+    }
+
+    currentStates(servers: PterodactylServer[]): string[] {
+        const states: string[] = [];
+        servers.forEach((server) => states.push(this.states.get(server.attributes.identifier)?.getStatus() ?? ''));
+        return states;
     }
 
     currentResources(): (ServerResources | null)[] {
@@ -65,7 +71,7 @@ export class State {
     readonly server: PterodactylServer;
     private resources: ServerResources | null;
 
-    readonly startingStatus: string;
+    private startingStatus: string;
     private currentStatus: string;
     private restartDetected = false;
 
@@ -82,6 +88,10 @@ export class State {
 
     getResources() {
         return this.resources;
+    }
+
+    getStatus() {
+        return this.currentStatus;
     }
 
     track(action: ActionType): void {
