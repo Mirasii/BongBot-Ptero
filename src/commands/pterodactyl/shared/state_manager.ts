@@ -86,11 +86,11 @@ export class State {
         this.currentUptime = resources?.attributes.resources.uptime ?? 0;
     }
 
-    getResources() {
+    getResources(): ServerResources | null {
         return this.resources;
     }
 
-    getStatus() {
+    getStatus(): string {
         return this.currentStatus;
     }
 

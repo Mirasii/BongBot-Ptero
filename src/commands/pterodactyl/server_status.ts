@@ -6,6 +6,7 @@ import {
     fetchAllServerResources,
     sendServerCommand,
     PterodactylServer,
+    ServerResources,
 } from './shared/pterodactyl_api.js';
 import { buildServerStatusEmbed } from './shared/server_status_embed.js';
 import { buildServerControlComponents, disableAllComponents } from './shared/server_control_components.js';
@@ -253,7 +254,7 @@ export default class ServerStatus {
         }
     }
 
-    private async baselineServers(dbServer: StoredPterodactylServer, identifier: string) {
+    private async baselineServers(dbServer: StoredPterodactylServer, identifier: string): Promise<void> {
         if (this.stateManager.managedServers().length === 0) {
             await this.collectServerInfo(dbServer.serverUrl, dbServer.apiKey);
             return;
@@ -262,13 +263,17 @@ export default class ServerStatus {
         await this.fetchResources(servers, dbServer.serverUrl, dbServer.apiKey);
     }
 
-    private async collectServerInfo(url: string, apiKey: string) {
+    private async collectServerInfo(url: string, apiKey: string): Promise<ServerSnapshot> {
         const servers = await fetchServers(this.caller, url, apiKey);
         const resources = await this.fetchResources(servers, url, apiKey);
         return { servers, resources };
     }
 
-    private async fetchResources(servers: PterodactylServer[], url: string, apiKey: string) {
+    private async fetchResources(
+        servers: PterodactylServer[],
+        url: string,
+        apiKey: string
+    ): Promise<(ServerResources | null)[]> {
         const resources = await fetchAllServerResources(this.caller, servers, url, apiKey);
         servers.forEach((server, index) => this.stateManager.attachState(server, resources[index]));
         return resources;
@@ -316,9 +321,14 @@ function delay(ms: number): Promise<void> {
 async function ephemeralFollowup(
     componentInteraction: ButtonInteraction | StringSelectMenuInteraction,
     content: string
-) {
+): Promise<void> {
     await componentInteraction.followUp({
         content: content,
         ephemeral: true,
     });
+}
+
+interface ServerSnapshot {
+    servers: PterodactylServer[];
+    resources: (ServerResources | null)[];
 }
