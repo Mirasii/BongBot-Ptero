@@ -1,7 +1,12 @@
 import { ChatInputCommandInteraction, ButtonInteraction, Message, StringSelectMenuInteraction } from 'discord.js';
 import Database, { StoredPterodactylServer } from '../../helpers/database.js';
 import { buildError, Caller } from '@pookiesoft/bongbot-core';
-import { fetchServers, fetchAllServerResources, sendServerCommand } from './shared/pterodactyl_api.js';
+import {
+    fetchServers,
+    fetchAllServerResources,
+    sendServerCommand,
+    PterodactylServer,
+} from './shared/pterodactyl_api.js';
 import { buildServerStatusEmbed } from './shared/server_status_embed.js';
 import { buildServerControlComponents, disableAllComponents } from './shared/server_control_components.js';
 import { StateManager, ActionType } from './shared/state_manager.js';
@@ -50,15 +55,7 @@ export default class ServerStatus {
                 throw new Error(`No server found with name "${serverName}". Your registered servers:\n\n${serverList}`);
             }
 
-            const servers = await fetchServers(this.caller, selectedServer.serverUrl, selectedServer.apiKey);
-            const resources = await fetchAllServerResources(
-                this.caller,
-                servers,
-                selectedServer.serverUrl,
-                selectedServer.apiKey
-            );
-
-            servers.forEach((server, index) => this.stateManager.newState(server, resources[index]));
+            const { servers, resources } = await this.mapServers(selectedServer.serverUrl, selectedServer.apiKey);
 
             const embed = buildServerStatusEmbed(servers, resources);
             const components = buildServerControlComponents(servers, resources, selectedServer.id);
@@ -160,17 +157,7 @@ export default class ServerStatus {
         identifier: string,
         action: ActionType
     ): Promise<void> {
-        const servers = this.stateManager.targets(identifier);
-        const refreshedResources = await fetchAllServerResources(
-            this.caller,
-            servers,
-            dbServer.serverUrl,
-            dbServer.apiKey
-        );
-
-        servers.forEach((server, index) => {
-            this.stateManager.newState(server, refreshedResources[index]);
-        });
+        await this.baselineServers(dbServer, identifier);
         // TODO: [BUGS 2.4] Add concurrency limiting (e.g. p-limit) and backoff on 429 responses
         const results = await Promise.all(
             this.stateManager.targets(identifier).map(async (server) => ({
@@ -259,6 +246,27 @@ export default class ServerStatus {
         }
     }
 
+    private async baselineServers(dbServer: StoredPterodactylServer, identifier: string) {
+        if (this.stateManager.managedServers().length === 0) {
+            await this.mapServers(dbServer.serverUrl, dbServer.apiKey);
+            return;
+        }
+        const servers = this.stateManager.targets(identifier);
+        await this.mapResources(servers, dbServer.serverUrl, dbServer.apiKey);
+    }
+
+    private async mapServers(url: string, apiKey: string) {
+        const servers = await fetchServers(this.caller, url, apiKey);
+        const resources = await this.mapResources(servers, url, apiKey);
+        return { servers, resources };
+    }
+
+    private async mapResources(servers: PterodactylServer[], url: string, apiKey: string) {
+        const resources = await fetchAllServerResources(this.caller, servers, url, apiKey);
+        servers.forEach((server, index) => this.stateManager.newState(server, resources[index]));
+        return resources;
+    }
+
     private async refreshStatus(
         componentInteraction: ButtonInteraction | StringSelectMenuInteraction,
         dbServerId: number
@@ -269,9 +277,7 @@ export default class ServerStatus {
             if (!dbServer) {
                 return;
             }
-
-            const servers = await fetchServers(this.caller, dbServer.serverUrl, dbServer.apiKey);
-            const resources = await fetchAllServerResources(this.caller, servers, dbServer.serverUrl, dbServer.apiKey);
+            const { servers, resources } = await this.mapServers(dbServer.serverUrl, dbServer.apiKey);
 
             const embed = buildServerStatusEmbed(
                 servers,

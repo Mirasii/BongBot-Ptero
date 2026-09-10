@@ -36,7 +36,7 @@ export class StateManager {
 
     currentResources(): (ServerResources | null)[] {
         const states: (ServerResources | null)[] = [];
-        this.states.forEach(state => states.push(state.resources))
+        this.states.forEach((state) => states.push(state.getResources()));
         return states;
     }
 
@@ -52,14 +52,6 @@ export class StateManager {
         servers.forEach((server, index) => this.states.get(server.attributes.identifier)?.observe(resources[index]));
     }
 
-    isComplete(identifier: string): boolean {
-        return this.states.get(identifier)?.isComplete() ?? false;
-    }
-
-    isWatching(): boolean {
-        return [...this.states.values()].some((state) => state.isWatched());
-    }
-
     allComplete(): boolean {
         return [...this.states.values()].every((state) => !state.isWatched() || state.isComplete());
     }
@@ -71,7 +63,7 @@ export class StateManager {
 
 export class State {
     readonly server: PterodactylServer;
-    resources: ServerResources | null;
+    private resources: ServerResources | null;
 
     readonly startingStatus: string;
     private currentStatus: string;
@@ -86,6 +78,10 @@ export class State {
         this.startingStatus = resources?.attributes.current_state ?? '';
         this.currentStatus = this.startingStatus;
         this.currentUptime = resources?.attributes.resources.uptime ?? 0;
+    }
+
+    getResources() {
+        return this.resources;
     }
 
     track(action: ActionType): void {
